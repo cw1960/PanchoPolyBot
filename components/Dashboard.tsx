@@ -2,19 +2,22 @@ import React, { useState, useEffect, useRef } from 'react';
 import { BotConfig, PricePoint, TradeLog } from '../types';
 import { generateMarketData, checkTradeCondition } from '../services/simulationService';
 import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine 
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from 'recharts';
-import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings } from 'lucide-react';
+import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2 } from 'lucide-react';
 
 export const Dashboard: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
+  const [activeMarkets, setActiveMarkets] = useState<string[]>([]);
+  
   const [data, setData] = useState<PricePoint[]>([]);
   const [trades, setTrades] = useState<TradeLog[]>([]);
   const [config, setConfig] = useState<BotConfig>({
     sourceExchange: 'Binance',
-    targetMarket: 'BTC > 100k (Jan)',
-    triggerThreshold: 0.3, // 0.3%
-    betSize: 313, // Starting amount from article
+    targetMarket: 'bitcoin-price-hit-100k-jan', // Default Slug
+    triggerThreshold: 0.3,
+    betSize: 313,
     maxDailyLoss: 1000,
     latencyBufferMs: 2000
   });
@@ -33,12 +36,27 @@ export const Dashboard: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [trades]);
 
-  // Simulation Loop
+  // Scanning Simulation
+  useEffect(() => {
+    if (isScanning) {
+      const timer = setTimeout(() => {
+        setIsScanning(false);
+        setIsRunning(true);
+        setActiveMarkets([
+          `YES: ${config.targetMarket} (ID: 0x82...9a)`,
+          `NO: ${config.targetMarket} (ID: 0x12...b4)`
+        ]);
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [isScanning, config.targetMarket]);
+
+  // Trading Simulation Loop
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
     if (isRunning) {
       interval = setInterval(() => {
-        const newPoint = generateMarketData(3); // 3 seconds lag factor simulation
+        const newPoint = generateMarketData(3);
         
         setData(prev => {
           const newData = [...prev, newPoint];
@@ -46,13 +64,10 @@ export const Dashboard: React.FC = () => {
           return newData;
         });
 
-        // Check for trade opportunity
         const tradeSignal = checkTradeCondition(newPoint, config);
         
         if (tradeSignal) {
-          // Simulate trade result (random win for simulation demo based on the "high win rate" in article)
-          // In real life, this depends on if the market actually catches up.
-          const isWin = Math.random() > 0.10; // 90% simulated win rate (nerfed from 98% for realism)
+          const isWin = Math.random() > 0.10;
           const profit = isWin ? tradeSignal.amount * 0.8 : -tradeSignal.amount;
           
           const completedTrade: TradeLog = {
@@ -70,10 +85,19 @@ export const Dashboard: React.FC = () => {
           }));
         }
 
-      }, 500); // Update every 500ms
+      }, 500);
     }
     return () => clearInterval(interval);
   }, [isRunning, config]);
+
+  const handleStart = () => {
+    if (isRunning) {
+      setIsRunning(false);
+      setActiveMarkets([]);
+    } else {
+      setIsScanning(true);
+    }
+  };
 
   const winRate = stats.wins + stats.losses > 0 
     ? ((stats.wins / (stats.wins + stats.losses)) * 100).toFixed(1) 
@@ -85,7 +109,7 @@ export const Dashboard: React.FC = () => {
       <header className="flex justify-between items-center bg-zinc-900 border border-zinc-800 p-4 rounded-lg">
         <div className="flex items-center gap-3">
            <div className={`w-3 h-3 rounded-full ${isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-           <h1 className="text-xl font-mono font-bold tracking-tight text-white">PANCHO<span className="text-emerald-500">POLY</span>BOT_v1.0</h1>
+           <h1 className="text-xl font-mono font-bold tracking-tight text-white">PANCHO<span className="text-emerald-500">POLY</span>BOT_v1.1</h1>
         </div>
         
         <div className="flex items-center gap-6 text-sm font-mono">
@@ -106,15 +130,16 @@ export const Dashboard: React.FC = () => {
         </div>
 
         <button
-          onClick={() => setIsRunning(!isRunning)}
-          className={`flex items-center gap-2 px-4 py-2 rounded font-bold transition-colors ${
+          onClick={handleStart}
+          disabled={isScanning}
+          className={`flex items-center gap-2 px-4 py-2 rounded font-bold transition-colors w-40 justify-center ${
             isRunning 
               ? 'bg-red-900/50 text-red-200 hover:bg-red-900' 
               : 'bg-emerald-900/50 text-emerald-200 hover:bg-emerald-900'
           }`}
         >
-          {isRunning ? <Pause size={16} /> : <Play size={16} />}
-          {isRunning ? 'HALT SYSTEM' : 'INITIATE'}
+          {isScanning ? <Loader2 className="animate-spin" size={16}/> : (isRunning ? <Pause size={16} /> : <Play size={16} />)}
+          {isScanning ? 'SCANNING' : (isRunning ? 'HALT' : 'INITIATE')}
         </button>
       </header>
 
@@ -128,12 +153,13 @@ export const Dashboard: React.FC = () => {
             <div className="flex justify-between items-center mb-4">
               <h2 className="flex items-center gap-2 text-sm font-bold text-zinc-400">
                 <Activity size={16} /> 
-                LATENCY VISUALIZER (Binance vs Polymarket)
+                LATENCY VISUALIZER
               </h2>
-              <div className="flex gap-4 text-xs">
-                <span className="flex items-center gap-1"><span className="w-2 h-2 bg-emerald-500 rounded-full"></span> Binance (Source)</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-full"></span> Polymarket (Target)</span>
-              </div>
+              {activeMarkets.length > 0 && (
+                <div className="flex items-center gap-2 text-xs bg-emerald-900/30 text-emerald-400 px-2 py-1 rounded border border-emerald-900">
+                  <Check size={12} /> Live Tracking: {config.targetMarket}
+                </div>
+              )}
             </div>
             
             <div className="flex-1 w-full min-h-0">
@@ -173,9 +199,24 @@ export const Dashboard: React.FC = () => {
           <div className="h-48 bg-zinc-900 border border-zinc-800 rounded-lg p-4">
             <h2 className="flex items-center gap-2 text-sm font-bold text-zinc-400 mb-4">
               <Settings size={16} /> 
-              STRATEGY PARAMETERS
+              BOT PARAMETERS
             </h2>
             <div className="grid grid-cols-3 gap-6">
+              
+              <div>
+                <label className="block text-xs text-zinc-500 mb-1">Polymarket Slug / Keyword</label>
+                <div className="flex items-center gap-2 bg-zinc-950 p-2 rounded border border-zinc-800 focus-within:border-emerald-500 transition-colors">
+                  <Search size={14} className="text-zinc-600" />
+                  <input 
+                    type="text" 
+                    value={config.targetMarket}
+                    onChange={(e) => setConfig({...config, targetMarket: e.target.value})}
+                    placeholder="e.g. bitcoin-above-100k"
+                    className="bg-transparent text-sm text-white focus:outline-none w-full font-mono"
+                  />
+                </div>
+              </div>
+              
               <div>
                 <label className="block text-xs text-zinc-500 mb-1">Trigger Threshold (%)</label>
                 <div className="flex items-center gap-2 bg-zinc-950 p-2 rounded border border-zinc-800">
@@ -189,9 +230,9 @@ export const Dashboard: React.FC = () => {
                   />
                 </div>
               </div>
-              
+
               <div>
-                <label className="block text-xs text-zinc-500 mb-1">Bet Size ($)</label>
+                <label className="block text-xs text-zinc-500 mb-1">Bet Size (USDC)</label>
                 <div className="flex items-center gap-2 bg-zinc-950 p-2 rounded border border-zinc-800">
                   <DollarSign size={14} className="text-zinc-600" />
                   <input 
@@ -202,24 +243,11 @@ export const Dashboard: React.FC = () => {
                   />
                 </div>
               </div>
-
-              <div>
-                <label className="block text-xs text-zinc-500 mb-1">Source Exchange</label>
-                <div className="flex items-center gap-2 bg-zinc-950 p-2 rounded border border-zinc-800">
-                  <Activity size={14} className="text-zinc-600" />
-                  <select 
-                    value={config.sourceExchange}
-                    onChange={(e) => setConfig({...config, sourceExchange: e.target.value as any})}
-                    className="bg-transparent text-sm text-white focus:outline-none w-full font-mono"
-                  >
-                    <option value="Binance">Binance Spot</option>
-                    <option value="Coinbase">Coinbase Pro</option>
-                  </select>
-                </div>
-              </div>
             </div>
             <p className="mt-4 text-xs text-zinc-600 font-mono">
-              Status: {isRunning ? 'Scanning spread anomalies...' : 'Standby. Waiting for user input.'}
+              {isScanning 
+                ? 'STATUS: Querying Gamma API for Token IDs...' 
+                : (isRunning ? 'STATUS: Monitoring Price Deltas...' : 'STATUS: Standby')}
             </p>
           </div>
 
@@ -236,8 +264,17 @@ export const Dashboard: React.FC = () => {
           </div>
           
           <div className="flex-1 overflow-y-auto p-3 font-mono text-xs space-y-2">
-            {trades.length === 0 && (
-              <div className="text-zinc-700 text-center mt-10 italic">No trades executed yet.</div>
+            {activeMarkets.length > 0 && (
+              <div className="mb-4 pb-4 border-b border-zinc-900">
+                <div className="text-zinc-400 font-bold mb-2">Active Market IDs:</div>
+                {activeMarkets.map((m, i) => (
+                  <div key={i} className="text-zinc-600 truncate">{m}</div>
+                ))}
+              </div>
+            )}
+            
+            {trades.length === 0 && !isRunning && (
+              <div className="text-zinc-700 text-center mt-10 italic">Ready to initialize.</div>
             )}
             {trades.map((trade) => (
               <div key={trade.id} className="border-b border-zinc-900 pb-2">
