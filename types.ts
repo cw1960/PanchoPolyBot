@@ -8,7 +8,7 @@ export interface PricePoint {
 export interface TradeLog {
   id: string;
   timestamp: number;
-  type: 'BUY_YES' | 'BUY_NO';
+  type: 'BUY_YES' | 'BUY_NO' | 'BUY_UP' | 'BUY_DOWN';
   asset: string;
   entryPrice: number;
   marketPrice: number; // The leading indicator price at time of trade
