@@ -10,7 +10,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v6.15 (ROBUST RESOLVER)";
+const VERSION = "v7.0 (AUTO-DETECT EVENT ID)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -22,7 +22,7 @@ const CONFIG = {
     minPriceDelta: parseFloat(process.env.MIN_PRICE_DELTA || '5.0'), 
     betSizeUSDC: parseFloat(process.env.BET_SIZE_USDC || '10'),
     binanceSymbol: process.env.BINANCE_SYMBOL || 'btcusdt',
-    marketSlugs: [''], // Start empty
+    marketSlugs: [''], 
     rpcUrl: process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com',
 };
 
@@ -47,7 +47,6 @@ const wss = new WebSocketServer({ port: WSS_PORT });
 console.log(chalk.magenta(`> UI SERVER: Listening on ws://localhost:${WSS_PORT}`));
 
 wss.on('connection', (ws) => {
-    // 1. IMMEDIATE SYNC
     if (activeMarkets.length > 0) {
          const m = activeMarkets[0];
          ws.send(JSON.stringify({
@@ -65,7 +64,6 @@ wss.on('connection', (ws) => {
     ws.on('message', async (message) => {
         try {
             const data = JSON.parse(message);
-            
             if (data.type === 'UPDATE_CONFIG') {
                 const { slug, betSize, maxEntryPrice, minPriceDelta, referencePrice } = data.payload;
                 
@@ -73,13 +71,12 @@ wss.on('connection', (ws) => {
                 if (maxEntryPrice !== undefined) CONFIG.maxEntryPrice = parseFloat(maxEntryPrice);
                 if (minPriceDelta !== undefined) CONFIG.minPriceDelta = parseFloat(minPriceDelta);
 
-                const rawSlug = slug ? slug.toString().trim() : null;
+                const rawInput = slug ? slug.toString().trim() : null;
                 const newRefPrice = referencePrice ? parseFloat(referencePrice) : null;
                 
                 console.log(chalk.magenta(`\n> UI CONFIG UPDATE:`));
-                console.log(chalk.dim(`  Input: ${rawSlug}`));
+                console.log(chalk.dim(`  Input: ${rawInput}`));
 
-                // Apply Ref Price Override immediately if we have a market
                 if (newRefPrice && activeMarkets.length > 0) {
                     activeMarkets[0].referencePrice = newRefPrice;
                     broadcast('MARKET_LOCKED', {
@@ -90,19 +87,14 @@ wss.on('connection', (ws) => {
                     });
                 }
 
-                // Resolve New Market if input provided
-                if (rawSlug) {
-                     console.log(chalk.magenta(`  Resolving Input: ${rawSlug}`));
-                     broadcast('LOG', { message: `Searching for ${rawSlug}...` });
-                     
-                     // Reset state
+                if (rawInput) {
+                     console.log(chalk.magenta(`  Resolving: ${rawInput}`));
+                     broadcast('LOG', { message: `Searching for ${rawInput}...` });
                      activeMarkets = [];
-                     CONFIG.marketSlugs = [rawSlug];
                      
                      try {
-                        await resolveMarkets(CONFIG.marketSlugs);
+                        await resolveMarkets([rawInput]);
                         
-                        // If user provided a ref price during the resolution phase, apply it now
                         if (newRefPrice && activeMarkets.length > 0) {
                             activeMarkets[0].referencePrice = newRefPrice;
                             broadcast('MARKET_LOCKED', {
@@ -162,92 +154,84 @@ async function getBinanceOpenPrice(timestampMs) {
     return null;
 }
 
-// --- SAFE PARSER HELPER ---
 function safeParse(input) {
     if (Array.isArray(input)) return input;
-    if (typeof input === 'object' && input !== null) return input; // already object
+    if (typeof input === 'object' && input !== null) return input;
     if (typeof input === 'string') {
         try { return JSON.parse(input); } catch (e) { return null; }
     }
     return null;
 }
 
-async function resolveMarkets(rawSlugs) {
-    for (const rawSlug of rawSlugs) {
-        if (!rawSlug) continue;
+async function resolveMarkets(inputs) {
+    for (const rawInput of inputs) {
+        if (!rawInput) continue;
 
-        let cleanSlug = rawSlug;
-        let specificTid = null;
+        let cleanInput = rawInput;
+        let specificId = null;
 
-        // --- CHECK 1: PURE ID INPUT ---
-        if (/^\d+$/.test(rawSlug)) {
-             specificTid = rawSlug;
-             cleanSlug = "RAW_ID_MODE"; 
-             console.log(chalk.cyan(`> DETECTED RAW ID INPUT: ${specificTid}`));
-        } 
-        // --- CHECK 2: URL with tid param ---
-        else if (rawSlug.includes('tid=')) {
-            const parts = rawSlug.split('?');
-            cleanSlug = parts[0].trim();
+        // Extract ID if looks like ID or tid param
+        if (/^\d+$/.test(rawInput)) {
+             specificId = rawInput;
+        } else if (rawInput.includes('tid=')) {
+            const parts = rawInput.split('?');
+            cleanInput = parts[0].trim();
             const urlParams = new URLSearchParams(parts[1]);
-            specificTid = urlParams.get('tid');
-        } 
-        else {
-            cleanSlug = rawSlug.split('?')[0].trim();
+            specificId = urlParams.get('tid');
+        } else {
+            cleanInput = rawInput.split('?')[0].trim();
         }
 
-        console.log(chalk.yellow(`> Resolving...`));
+        console.log(chalk.yellow(`> Resolving Strategy for: ${cleanInput} / ID: ${specificId}`));
         broadcast('LOG', { message: `Querying API...` });
 
         try {
             let targetMarket = null;
 
-            // STRATEGY 1: DIRECT MARKET ID LOOKUP
-            if (specificTid) {
+            // --- STRATEGY 1: ID LOOKUP ---
+            if (specificId) {
+                // A) Try as Market ID
                 try {
-                    console.log(chalk.blue(`> Trying /markets/${specificTid}...`));
-                    const directRes = await axios.get(`https://gamma-api.polymarket.com/markets/${specificTid}`);
-                    if (directRes.data) {
-                        targetMarket = directRes.data;
-                        console.log(chalk.green(`> Found Market Object via ID.`));
+                    const marketRes = await axios.get(`https://gamma-api.polymarket.com/markets/${specificId}`);
+                    if (marketRes.data) {
+                        targetMarket = marketRes.data;
+                        console.log(chalk.green(`> Found directly via Market ID`));
                     }
-                } catch (err) {
-                    console.log(chalk.yellow(`> /markets/${specificTid} failed: ${err.message}`));
-                }
+                } catch (e) { /* Ignore 404 */ }
 
-                // STRATEGY 2: EVENT LOOKUP BY ID (Fallback)
+                // B) Try as Event ID (Fallback)
                 if (!targetMarket) {
                     try {
-                        console.log(chalk.blue(`> Trying /events?id=${specificTid}...`));
-                        const eventRes = await axios.get(`https://gamma-api.polymarket.com/events?id=${specificTid}`);
+                        console.log(chalk.blue(`> Market ID failed. Checking if ID is an EVENT ID...`));
+                        const eventRes = await axios.get(`https://gamma-api.polymarket.com/events?id=${specificId}`);
                         if (eventRes.data && eventRes.data.length > 0) {
                             const markets = eventRes.data[0].markets;
-                            targetMarket = markets.find(m => m.id == specificTid); // Loose equality
-                            if(targetMarket) console.log(chalk.green(`> Found Market inside Event.`));
+                            if (markets && markets.length > 0) {
+                                // If exact match failed, assume the user gave the Event ID and wants the first market
+                                targetMarket = markets[0]; 
+                                console.log(chalk.green(`> Found Event! Auto-selecting first market: ${targetMarket.id}`));
+                            }
                         }
-                    } catch (err) {
-                        console.log(chalk.yellow(`> /events?id=${specificTid} failed.`));
-                    }
+                    } catch (e) { /* Ignore */ }
                 }
             }
 
-            // STRATEGY 3: SLUG SEARCH
-            if (!targetMarket && cleanSlug !== "RAW_ID_MODE") {
-                const response = await axios.get(`https://gamma-api.polymarket.com/events?slug=${cleanSlug}`);
-                if (response.data.length > 0) { 
-                    const markets = response.data[0].markets;
-                    if (specificTid) {
-                        targetMarket = markets.find(m => m.id == specificTid || (m.clobTokenIds && JSON.stringify(m.clobTokenIds).includes(specificTid)));
-                    } else {
+            // --- STRATEGY 2: SLUG LOOKUP ---
+            if (!targetMarket && !/^\d+$/.test(cleanInput)) {
+                try {
+                    const slugRes = await axios.get(`https://gamma-api.polymarket.com/events?slug=${cleanInput}`);
+                    if (slugRes.data.length > 0) {
+                        const markets = slugRes.data[0].markets;
+                        // If specificId exists but wasn't found as Event/Market earlier, try to find inside slug results?
+                        // Generally if we are here, just take the first market
                         targetMarket = markets[0];
                     }
-                }
+                } catch (e) { /* Ignore */ }
             }
 
-            // --- FINAL VALIDATION ---
             if (!targetMarket) {
-                 console.error(chalk.red(`> Market NOT FOUND for input: ${rawSlug}`)); 
-                 broadcast('ERROR', { message: `Market Not Found` });
+                 console.error(chalk.red(`> Market NOT FOUND. Input: ${rawInput}`)); 
+                 broadcast('ERROR', { message: `Market/Event ID Not Found` });
                  continue; 
             }
             
@@ -257,16 +241,19 @@ async function resolveMarkets(rawSlugs) {
                  continue; 
             }
 
-            // --- ROBUST TOKEN ID PARSING ---
-            // Outcomes and TokenIds can be strings OR arrays depending on the API response version
+            // --- TOKEN PARSING (ROBUST) ---
             const outcomes = safeParse(targetMarket.outcomes);
-            const tokenIds = safeParse(targetMarket.clobTokenIds);
+            let tokenIds = safeParse(targetMarket.clobTokenIds);
 
-            if (!outcomes || !Array.isArray(outcomes) || !tokenIds || !Array.isArray(tokenIds)) {
-                console.error(chalk.red(`> Data Parsing Error: outcomes/tokens format invalid.`));
-                console.log("Outcomes:", targetMarket.outcomes);
-                console.log("Tokens:", targetMarket.clobTokenIds);
-                broadcast('ERROR', { message: `Data Parsing Error` });
+            // Fallback: If clobTokenIds is missing, check 'tokens' array
+            if ((!tokenIds || tokenIds.length === 0) && targetMarket.tokens) {
+                 console.log(chalk.gray(`> Using 'tokens' array fallback...`));
+                 tokenIds = targetMarket.tokens.map(t => t.tokenId);
+            }
+
+            if (!outcomes || !tokenIds || outcomes.length !== tokenIds.length) {
+                console.error(chalk.red(`> Data Structure Mismatch. Outcomes: ${outcomes?.length}, Tokens: ${tokenIds?.length}`));
+                broadcast('ERROR', { message: `Data Parsing Error (Tokens)` });
                 continue;
             }
 
@@ -280,30 +267,26 @@ async function resolveMarkets(rawSlugs) {
             });
 
             if (!upTokenId || !downTokenId) {
-                console.error(chalk.red(`> Could not find UP/DOWN or YES/NO outcomes.`));
-                broadcast('ERROR', { message: `Outcomes Not Compatible` });
+                console.error(chalk.red(`> Could not identify Yes/No or Up/Down tokens.`));
+                broadcast('ERROR', { message: `Tokens Not Compatible` });
                 continue;
             }
             
             const startTs = new Date(targetMarket.startDate).getTime();
             let referencePrice = await getBinanceOpenPrice(startTs);
-            if (!referencePrice) {
-                 console.log(chalk.red(`> Ref Price not found, defaulting to 0.`));
-                 referencePrice = 0; 
-            }
+            if (!referencePrice) referencePrice = 0; 
             
-            console.log(chalk.green(`> LOCKED: ${targetMarket.id} | Ref: $${referencePrice}`));
+            console.log(chalk.green(`> LOCKED: ${targetMarket.id} [${targetMarket.slug}]`));
             
-            // Success Broadcast
             broadcast('MARKET_LOCKED', {
-                slug: rawSlug, 
+                slug: targetMarket.slug || rawInput, 
                 referencePrice: referencePrice,
                 upId: upTokenId,
                 downId: downTokenId
             });
 
             activeMarkets.push({
-                slug: rawSlug, 
+                slug: targetMarket.slug || rawInput, 
                 upId: upTokenId, 
                 downId: downTokenId, 
                 referencePrice: referencePrice, 
@@ -311,7 +294,6 @@ async function resolveMarkets(rawSlugs) {
             });
         } catch (e) { 
             console.error(chalk.red(`> Unhandled Error: ${e.message}`));
-            console.error(e);
             broadcast('ERROR', { message: `System Error: ${e.message}` });
         }
     }
@@ -439,5 +421,4 @@ async function executeTrade(market, tokenId, price, direction) {
     }
 }
 
-// Initial Kickoff
 resolveMarkets(CONFIG.marketSlugs);
