@@ -10,7 +10,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v6.6 (LIVE CONFIG ENABLED)";
+const VERSION = "v6.7 (WAITING FOR DASHBOARD)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -194,7 +194,9 @@ async function resolveMarkets(slugs) {
     }
 
     if (activeMarkets.length === 0) { 
-        console.error(chalk.red("> No active markets configured. Waiting for update..."));
+        console.log(chalk.bgYellow.black("\n> SYSTEM IDLE: No open markets found in initial config."));
+        console.log(chalk.yellow("> ACTION REQUIRED: Go to the Dashboard (http://localhost:3000)"));
+        console.log(chalk.yellow("> Enter a valid 'Market Slug' and click Update to start."));
     } else {
         console.log(chalk.blue(`> Engine Ready. Streaming...`));
         startTrading();

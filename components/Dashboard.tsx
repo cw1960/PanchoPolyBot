@@ -3,7 +3,7 @@ import { BotConfig, PricePoint, TradeLog } from '../types';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts';
-import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff, Copy, FolderSearch, RefreshCw, AlertTriangle, XCircle, ArrowRight, Save } from 'lucide-react';
+import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff, Copy, FolderSearch, RefreshCw, AlertTriangle, XCircle, ArrowRight, Save, Link } from 'lucide-react';
 
 export const Dashboard: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
@@ -11,7 +11,7 @@ export const Dashboard: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
   // Configuration State
-  const [newSlug, setNewSlug] = useState('bitcoin-up-or-down-january-7-2am-et');
+  const [newSlug, setNewSlug] = useState('');
   const [betSize, setBetSize] = useState('10');
   const [maxEntry, setMaxEntry] = useState('0.95');
   const [minDelta, setMinDelta] = useState('5.0');
@@ -220,8 +220,8 @@ export const Dashboard: React.FC = () => {
         <div className="flex items-center gap-8 text-sm font-mono">
            <div className="flex flex-col items-end opacity-80">
              <span className="text-[10px] text-zinc-500 font-bold tracking-wider">STATUS</span>
-             <span className={`font-bold text-xs truncate max-w-[200px] ${errorMsg ? 'text-red-400' : 'text-emerald-400'}`}>
-                {activeMarket === 'STOPPED' ? 'IDLE' : 'SCANNING'}
+             <span className={`font-bold text-xs truncate max-w-[200px] ${activeMarket === 'STOPPED' || errorMsg ? 'text-red-400' : 'text-emerald-400'}`}>
+                {activeMarket === 'STOPPED' ? 'IDLE' : activeMarket === 'Scanning Markets...' ? 'INITIALIZING' : 'RUNNING'}
              </span>
            </div>
         </div>
@@ -267,6 +267,24 @@ export const Dashboard: React.FC = () => {
                        <div className="text-center">
                            <Loader2 className="w-10 h-10 text-emerald-500 animate-spin mx-auto mb-4" />
                            <p className="text-zinc-400 font-mono">Waiting for Data Stream...</p>
+                       </div>
+                   </div>
+               )}
+               
+               {isConnected && (activeMarket === 'STOPPED' || activeMarket === 'Scanning Markets...') && (
+                   <div className="absolute inset-0 flex items-center justify-center z-20 bg-black/80 backdrop-blur-md">
+                       <div className="text-center p-8 border border-zinc-800 rounded-lg bg-zinc-950 shadow-2xl">
+                           <div className="bg-yellow-900/20 p-4 rounded-full w-fit mx-auto mb-4">
+                             <Link className="w-8 h-8 text-yellow-500 animate-pulse" />
+                           </div>
+                           <h3 className="text-xl font-bold text-white mb-2">System Idle</h3>
+                           <p className="text-zinc-400 text-sm mb-6 max-w-md mx-auto">
+                               The bot is connected but has no active market configured. 
+                               Please find a valid <span className="text-emerald-400 font-mono">Market Slug</span> from Polymarket and enter it in the configuration panel on the right.
+                           </p>
+                           <div className="text-xs text-zinc-600 font-mono bg-zinc-900 p-2 rounded">
+                               e.g. bitcoin-price-jan-8-2025
+                           </div>
                        </div>
                    </div>
                )}
