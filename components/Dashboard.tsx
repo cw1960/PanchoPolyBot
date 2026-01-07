@@ -88,11 +88,6 @@ export const Dashboard: React.FC = () => {
                 }));
             }
             
-            // 1.5 Config Update Log
-            if (msg.type === 'LOG' && msg.payload.message.includes('Config Updated')) {
-               // Optional: Show a toast or flash success
-            }
-
             // 2. Real-time Price Update
             if (msg.type === 'PRICE_UPDATE') {
                 const point: PricePoint = {
@@ -230,8 +225,8 @@ export const Dashboard: React.FC = () => {
         <div className="flex items-center gap-8 text-sm font-mono">
            <div className="flex flex-col items-end opacity-80">
              <span className="text-[10px] text-zinc-500 font-bold tracking-wider">STATUS</span>
-             <span className={`font-bold text-xs truncate max-w-[200px] ${activeMarket === 'STOPPED' || errorMsg ? 'text-red-400' : 'text-emerald-400'}`}>
-                {activeMarket === 'STOPPED' ? 'IDLE' : activeMarket === 'Scanning Markets...' ? 'INITIALIZING' : 'RUNNING'}
+             <span className={`font-bold text-xs truncate max-w-[200px] ${activeMarket === 'STOPPED' || errorMsg ? 'text-red-400' : (activeMarket === 'Updating...' ? 'text-yellow-400' : 'text-emerald-400')}`}>
+                {activeMarket === 'STOPPED' ? 'IDLE' : activeMarket === 'Scanning Markets...' ? 'INITIALIZING' : activeMarket === 'Updating...' ? 'SEARCHING...' : 'RUNNING'}
              </span>
            </div>
         </div>
@@ -295,6 +290,18 @@ export const Dashboard: React.FC = () => {
                            <div className="text-xs text-zinc-600 font-mono bg-zinc-900 p-2 rounded">
                                e.g. 1767803541594
                            </div>
+                       </div>
+                   </div>
+               )}
+
+               {isConnected && activeMarket === 'Updating...' && (
+                   <div className="absolute inset-0 flex items-center justify-center z-20 bg-black/80 backdrop-blur-md">
+                       <div className="text-center p-8">
+                           <Loader2 className="w-12 h-12 text-yellow-500 animate-spin mx-auto mb-4" />
+                           <h3 className="text-xl font-bold text-white mb-2">Searching Market...</h3>
+                           <p className="text-zinc-400 text-sm font-mono">
+                               Resolving ID: <span className="text-emerald-400">{newSlug}</span>
+                           </p>
                        </div>
                    </div>
                )}
