@@ -3,11 +3,11 @@ import { BotConfig, PricePoint, TradeLog } from '../types';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts';
-import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff } from 'lucide-react';
+import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff, Copy, FolderSearch, RefreshCw } from 'lucide-react';
 
 export const Dashboard: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
-  const [activeMarket, setActiveMarket] = useState<string>('Waiting for bot...');
+  const [activeMarket, setActiveMarket] = useState<string>('Scanning Markets...');
   
   const [data, setData] = useState<PricePoint[]>([]);
   const [trades, setTrades] = useState<TradeLog[]>([]);
@@ -20,13 +20,6 @@ export const Dashboard: React.FC = () => {
     latencyBufferMs: 0
   });
 
-  const [stats, setStats] = useState({
-    balance: 0, // Real balance would require another API call, keeping 0 for now or manual
-    profit: 0,
-    wins: 0,
-    losses: 0
-  });
-
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const ws = useRef<WebSocket | null>(null);
 
@@ -36,7 +29,15 @@ export const Dashboard: React.FC = () => {
 
   // --- REAL WEBSOCKET CONNECTION ---
   useEffect(() => {
+    let interval: ReturnType<typeof setInterval>;
+    
     const connect = () => {
+        // Close existing if open to prevent duplicates
+        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+            return;
+        }
+
+        console.log("Attempting to connect to ws://localhost:8080");
         const socket = new WebSocket('ws://localhost:8080');
         ws.current = socket;
 
@@ -47,8 +48,12 @@ export const Dashboard: React.FC = () => {
 
         socket.onclose = () => {
             setIsConnected(false);
-            console.log("Disconnected. Retrying...");
-            setTimeout(connect, 3000); // Retry connection
+            console.log("Disconnected.");
+        };
+
+        socket.onerror = (err) => {
+            console.log("WS Error", err);
+            socket.close();
         };
 
         socket.onmessage = (event) => {
@@ -87,24 +92,27 @@ export const Dashboard: React.FC = () => {
                     type: msg.payload.type === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
                     asset: msg.payload.asset,
                     entryPrice: msg.payload.price,
-                    marketPrice: 0, // Not provided in simple payload yet
+                    marketPrice: 0, 
                     amount: msg.payload.amount,
                     status: 'OPEN',
                     profit: 0
                 };
                 setTrades(prev => [...prev, newTrade]);
             }
-            
-            // 4. Snipe Signal (Visual only)
-            if (msg.type === 'SNIPE_SIGNAL') {
-                // Could flash the screen or something
-            }
         };
     };
 
     connect();
+    
+    // Aggressive Reconnection Logic (Every 1 second)
+    interval = setInterval(() => {
+        if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
+            connect();
+        }
+    }, 1000);
 
     return () => {
+        clearInterval(interval);
         ws.current?.close();
     };
   }, []);
@@ -114,29 +122,53 @@ export const Dashboard: React.FC = () => {
   return (
     <div className="h-screen flex flex-col p-4 gap-4 overflow-hidden bg-zinc-950">
       
-      {/* Real Mode Banner */}
+      {/* Real Mode Banner - Simplified */}
       {!isConnected && (
-        <div className="bg-red-900/20 border border-red-800/50 p-2 rounded text-xs text-red-200 flex items-center justify-center gap-2 font-mono animate-pulse">
-            <WifiOff size={14} className="text-red-400" />
-            <span className="font-bold">DISCONNECTED:</span>
-            <span className="opacity-75">Ensure 'node bot.mjs' is running in your terminal. Retrying...</span>
+        <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-lg flex flex-col md:flex-row items-center justify-between gap-4 font-mono shadow-xl animate-in fade-in slide-in-from-top-4 duration-500">
+            <div className="flex items-center gap-4">
+                <div className="p-3 bg-zinc-800 rounded-full animate-pulse">
+                    <Loader2 size={24} className="text-zinc-400 animate-spin" />
+                </div>
+                <div>
+                    <h2 className="text-white font-bold text-lg flex items-center gap-2">
+                        WAITING FOR BOT CONNECTION...
+                        <span className="text-xs font-normal text-zinc-500 bg-zinc-800 px-2 py-0.5 rounded">Port 8080</span>
+                    </h2>
+                    <p className="text-zinc-500 text-xs">
+                        Keep your terminal open and running. The dashboard will connect automatically.
+                    </p>
+                </div>
+            </div>
+            
+            <div className="flex items-center gap-4 w-full md:w-auto">
+                 <div className="hidden md:block h-8 w-px bg-zinc-800"></div>
+                 <div className="flex-1 md:flex-none">
+                       <p className="text-[10px] text-zinc-500 font-bold uppercase mb-1">Current Command</p>
+                       <div className="flex items-center gap-2 bg-black/50 p-2 rounded border border-zinc-700 hover:border-emerald-500 transition-colors cursor-pointer group"
+                            onClick={() => navigator.clipboard.writeText('cd ~/Desktop/pancho-bot/backend && node bot.mjs')}>
+                           <code className="text-emerald-400 font-bold text-xs select-all">cd ~/Desktop/pancho-bot/backend && node bot.mjs</code>
+                           <Copy size={12} className="text-zinc-600 group-hover:text-emerald-500" />
+                       </div>
+                 </div>
+            </div>
         </div>
       )}
+
       {isConnected && (
-         <div className="bg-emerald-900/20 border border-emerald-800/50 p-2 rounded text-xs text-emerald-200 flex items-center justify-center gap-2 font-mono">
+         <div className="bg-emerald-900/20 border border-emerald-800/50 p-2 rounded text-xs text-emerald-200 flex items-center justify-center gap-2 font-mono animate-in fade-in">
             <Wifi size={14} className="text-emerald-400" />
-            <span className="font-bold">LIVE DATA STREAM:</span>
-            <span className="opacity-75">Connected to local bot engine.</span>
+            <span className="font-bold">SYSTEM ONLINE:</span>
+            <span className="opacity-75">Receiving live telemetry from local engine.</span>
          </div>
       )}
 
       {/* Top Bar */}
-      <header className="flex justify-between items-center bg-zinc-900/50 border border-zinc-800 p-4 rounded-lg backdrop-blur-sm">
+      <header className={`flex justify-between items-center bg-zinc-900/50 border border-zinc-800 p-4 rounded-lg backdrop-blur-sm transition-opacity duration-500 ${!isConnected ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
         <div className="flex items-center gap-3">
            <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_10px_#10b981]' : 'bg-red-500'}`} />
            <div className="flex flex-col">
              <h1 className="text-xl font-mono font-bold tracking-tight text-white leading-none">PANCHO<span className="text-emerald-500">POLY</span>BOT</h1>
-             <span className="text-[10px] text-zinc-500 font-mono tracking-widest mt-0.5">PRODUCTION COMMAND CENTER</span>
+             <span className="text-zinc-500 text-[10px] font-mono tracking-widest mt-0.5">PRODUCTION COMMAND CENTER</span>
            </div>
         </div>
         
@@ -148,7 +180,7 @@ export const Dashboard: React.FC = () => {
         </div>
       </header>
 
-      <div className="flex-1 grid grid-cols-12 gap-4 min-h-0">
+      <div className={`flex-1 grid grid-cols-12 gap-4 min-h-0 transition-opacity duration-500 ${!isConnected ? 'opacity-25 pointer-events-none grayscale' : 'opacity-100'}`}>
         
         {/* Left Column: Chart */}
         <div className="col-span-8 flex flex-col gap-4">

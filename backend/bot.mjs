@@ -8,10 +8,12 @@ import chalk from 'chalk';
 import axios from 'axios';
 import process from 'process';
 
-// Get current directory for logging
-const cwd = process.cwd();
-
-console.log(chalk.cyan(`> DEBUG: Running on ${process.platform} in directory: ${cwd}`));
+// --- VERSION CHECK ---
+const VERSION = "v6.0 (FINAL)";
+console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
+console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
+console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
+console.log(chalk.bgBlue.white.bold(`------------------------------------------------\n`));
 
 // --- CONFIGURATION ---
 const CONFIG = {
@@ -37,13 +39,10 @@ let activeMarkets = [];
 let isProcessing = false;
 let ticks = 0;
 
-console.log(chalk.bgGreen.black(`\n> PANCHOPOLYBOT: PRODUCTION ENGINE v4.0 (REAL-TIME)\n`));
-
 // --- UI SERVER SETUP ---
-// This allows the frontend to see what the bot is doing
 const WSS_PORT = 8080;
 const wss = new WebSocketServer({ port: WSS_PORT });
-console.log(chalk.magenta(`> UI SERVER: Broadcasting on ws://localhost:${WSS_PORT}`));
+console.log(chalk.magenta(`> UI SERVER: Listening on ws://localhost:${WSS_PORT}`));
 
 function broadcast(type, payload) {
     const message = JSON.stringify({ type, timestamp: Date.now(), payload });
@@ -136,7 +135,6 @@ async function resolveMarkets(slugs) {
     if (activeMarkets.length === 0) { 
         console.error(chalk.red("No active markets found. Check your slug in .env"));
         broadcast('ERROR', { message: 'No active markets found' });
-        // Don't exit process so UI stays connected
     } else {
         console.log(chalk.blue(`> Engine Ready. Connecting to Binance Stream...`));
         startTrading();
