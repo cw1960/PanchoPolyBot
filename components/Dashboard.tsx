@@ -2,14 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { 
   Activity, Power, Server, Shield, Plus, Trash2, 
   Settings, Database, Cloud, AlertTriangle, RefreshCw, 
-  Terminal, Lock, PlayCircle, StopCircle, Search, WifiOff
+  Terminal, Lock, PlayCircle, StopCircle, Search, WifiOff,
+  ToggleLeft, ToggleRight, AlertCircle
 } from 'lucide-react';
-import { MarketConfig, BotState, BotStatus } from '../types';
+import { MarketWithState, BotState, MarketStatusRow } from '../types';
 import { supabase } from '../services/supabaseClient';
 
 export const Dashboard: React.FC = () => {
   // State
-  const [markets, setMarkets] = useState<MarketConfig[]>([]);
+  const [markets, setMarkets] = useState<MarketWithState[]>([]);
   const [botState, setBotState] = useState<BotState>({
     status: 'STOPPED',
     lastHeartbeat: 0,
@@ -45,48 +46,58 @@ export const Dashboard: React.FC = () => {
         return;
       }
 
-      // B. Fetch Markets
+      // B. Fetch Markets Config
       const { data: marketsData, error: marketsError } = await supabase
         .from('markets')
         .select('*')
         .order('created_at', { ascending: true });
       
       if (marketsError) throw marketsError;
-      setMarkets(marketsData || []);
 
-      // C. Fetch Bot Control & Status
+      // C. Fetch Live Market State (Read-Only)
+      const { data: stateData, error: stateError } = await supabase
+        .from('market_state')
+        .select('*');
+
+      // Merge Config + State
+      const mergedMarkets: MarketWithState[] = (marketsData || []).map(m => {
+        const liveState = stateData?.find(s => s.market_id === m.id);
+        return { ...m, liveState };
+      });
+      
+      setMarkets(mergedMarkets);
+
+      // D. Fetch Bot Control & Status
       const { data: controlData } = await supabase
         .from('bot_control')
         .select('*')
         .eq('id', 1)
         .single();
 
-      // D. Fetch Logs (Last 10)
+      // E. Fetch Logs (Last 15)
       const { data: logsData } = await supabase
         .from('bot_events')
         .select('message, created_at, level')
         .order('created_at', { ascending: false })
-        .limit(10);
+        .limit(15);
       
       const formattedLogs = (logsData || []).map(l => 
         `> [${new Date(l.created_at).toLocaleTimeString()}] ${l.level}: ${l.message}`
       ).reverse();
 
-      // Update State
+      // Update Bot State
       setBotState(prev => ({
         ...prev,
         status: controlData?.desired_state === 'running' ? 'RUNNING' : 'STOPPED',
-        activeMarkets: marketsData?.filter(m => m.enabled).length || 0,
+        activeMarkets: mergedMarkets.filter(m => m.enabled).length,
         logs: formattedLogs.length > 0 ? formattedLogs : prev.logs,
-        // Calculate mock exposure for now, or fetch from market_state if populated
-        totalExposure: marketsData?.reduce((acc, m) => acc + (m.enabled ? 0 : 0), 0) || 0
+        totalExposure: mergedMarkets.reduce((acc, m) => acc + (m.liveState?.exposure || 0), 0)
       }));
 
       setIsLoading(false);
 
     } catch (err) {
       console.error("Polling Error:", err);
-      // Optional: handle connection errors gracefully
     }
   };
 
@@ -105,8 +116,36 @@ export const Dashboard: React.FC = () => {
     setIsSyncing(false);
   };
 
+  const handleToggleMarket = async (market: MarketWithState) => {
+    setIsSyncing(true);
+    const newState = !market.enabled;
+    
+    const { error } = await supabase
+      .from('markets')
+      .update({ enabled: newState })
+      .eq('id', market.id);
+
+    if (error) {
+      alert("Failed to update market: " + error.message);
+    } else {
+      await supabase.from('bot_events').insert({ 
+        level: 'INFO', 
+        message: `CMD: ${newState ? 'ENABLE' : 'DISABLE'} market ${market.polymarket_market_id}` 
+      });
+      fetchData();
+    }
+    setIsSyncing(false);
+  };
+
   const handleAddMarket = async () => {
     if (!newMarketInput.trim()) return;
+    
+    // Enforcement: Max 5 Markets
+    if (markets.length >= 5) {
+      alert("LIMIT REACHED: Maximum 5 markets allowed in this version.");
+      return;
+    }
+
     setIsSyncing(true);
     
     // Insert new market
@@ -115,7 +154,9 @@ export const Dashboard: React.FC = () => {
       asset: 'UNK', // VPS will resolve this later
       direction: 'UP',
       enabled: true,
-      max_exposure: 50
+      max_exposure: 50,
+      min_price_delta: 5.0,
+      max_entry_price: 0.95
     });
 
     if (!error) {
@@ -193,9 +234,9 @@ export const Dashboard: React.FC = () => {
               <Shield className="text-yellow-500" />
            </div>
            <div>
-             <h2 className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Active Markets</h2>
+             <h2 className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Total Exposure</h2>
              <p className="font-mono text-xl font-bold text-white">
-               {botState.activeMarkets}
+               ${botState.totalExposure.toFixed(2)}
              </p>
            </div>
         </div>
@@ -209,12 +250,12 @@ export const Dashboard: React.FC = () => {
              </p>
            </div>
            {botState.status === 'RUNNING' ? (
-             <button disabled={isSyncing} onClick={handleStopBot} className="bg-red-900/50 hover:bg-red-900 text-red-400 border border-red-800 p-3 rounded-full transition-all disabled:opacity-50">
-                <StopCircle size={24} />
+             <button disabled={isSyncing} onClick={handleStopBot} className="bg-red-900/50 hover:bg-red-900 text-red-400 border border-red-800 p-3 rounded-full transition-all disabled:opacity-50 group">
+                <StopCircle size={24} className="group-hover:scale-110 transition-transform" />
              </button>
            ) : (
-             <button disabled={isSyncing} onClick={handleStartBot} className="bg-emerald-900/50 hover:bg-emerald-900 text-emerald-400 border border-emerald-800 p-3 rounded-full transition-all disabled:opacity-50">
-                <PlayCircle size={24} />
+             <button disabled={isSyncing} onClick={handleStartBot} className="bg-emerald-900/50 hover:bg-emerald-900 text-emerald-400 border border-emerald-800 p-3 rounded-full transition-all disabled:opacity-50 group">
+                <PlayCircle size={24} className="group-hover:scale-110 transition-transform" />
              </button>
            )}
         </div>
@@ -231,40 +272,70 @@ export const Dashboard: React.FC = () => {
               </h3>
               <button 
                 onClick={() => setShowAddModal(true)}
-                className="bg-zinc-800 hover:bg-zinc-700 text-white text-xs px-3 py-2 rounded flex items-center gap-2 transition-colors border border-zinc-700"
+                disabled={markets.length >= 5}
+                className="bg-zinc-800 hover:bg-zinc-700 text-white text-xs px-3 py-2 rounded flex items-center gap-2 transition-colors border border-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Plus size={14} /> ADD MARKET
+                <Plus size={14} /> ADD MARKET ({markets.length}/5)
               </button>
            </div>
 
            <div className="space-y-3">
               {markets.map(market => (
-                <div key={market.id} className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 flex flex-col gap-4 group hover:border-zinc-700 transition-all">
+                <div key={market.id} className={`bg-zinc-900 border rounded-lg p-4 flex flex-col gap-4 group transition-all ${market.enabled ? 'border-zinc-800 hover:border-zinc-700' : 'border-zinc-800 opacity-60'}`}>
                    <div className="flex justify-between items-start">
                       <div className="flex items-center gap-3">
-                         <div className={`w-2 h-2 rounded-full ${market.enabled ? 'bg-emerald-500' : 'bg-zinc-600'}`} />
-                         <div>
-                            <h4 className="font-mono font-bold text-emerald-400 text-sm truncate max-w-[300px]">{market.polymarket_market_id}</h4>
-                            <p className="text-xs text-zinc-500">UUID: {market.id}</p>
+                         {/* Toggle Switch */}
+                         <button 
+                           onClick={() => handleToggleMarket(market)}
+                           className={`transition-colors ${market.enabled ? 'text-emerald-500 hover:text-emerald-400' : 'text-zinc-600 hover:text-zinc-500'}`}
+                         >
+                            {market.enabled ? <ToggleRight size={32} /> : <ToggleLeft size={32} />}
+                         </button>
+                         
+                         <div className="overflow-hidden">
+                            <h4 className="font-mono font-bold text-emerald-400 text-sm truncate max-w-[350px]" title={market.polymarket_market_id}>
+                              {market.polymarket_market_id}
+                            </h4>
+                            <div className="flex items-center gap-3 mt-1">
+                                <span className="text-[10px] bg-zinc-800 text-zinc-400 px-1.5 py-0.5 rounded border border-zinc-700 font-mono">
+                                  {market.enabled ? 'ACTIVE' : 'PAUSED'}
+                                </span>
+                                <span className="text-[10px] text-zinc-500 font-mono">
+                                  ID: {market.id.split('-')[0]}...
+                                </span>
+                            </div>
                          </div>
                       </div>
-                      <div className="flex items-center gap-2 opacity-50 group-hover:opacity-100 transition-opacity">
-                         <button onClick={() => handleRemoveMarket(market.id)} className="p-2 hover:bg-red-900/30 rounded text-red-500"><Trash2 size={14}/></button>
+                      <div className="flex items-center gap-2">
+                         <button onClick={() => handleRemoveMarket(market.id)} className="p-2 hover:bg-red-900/30 rounded text-red-500 transition-colors opacity-50 hover:opacity-100"><Trash2 size={16}/></button>
                       </div>
                    </div>
                    
-                   <div className="grid grid-cols-3 gap-4 border-t border-zinc-800/50 pt-3">
+                   {/* Live State & Config */}
+                   <div className="grid grid-cols-4 gap-4 border-t border-zinc-800/50 pt-3">
                       <div>
-                        <label className="text-[10px] uppercase text-zinc-600 font-bold block">Max Risk</label>
-                        <span className="font-mono text-sm text-zinc-300">${market.max_exposure}</span>
+                        <label className="text-[10px] uppercase text-zinc-600 font-bold block">Live Status</label>
+                        <span className={`font-mono text-sm ${market.liveState?.status === 'LOCKED' ? 'text-emerald-400' : 'text-zinc-500'}`}>
+                           {market.liveState?.status || 'PENDING'}
+                        </span>
                       </div>
                       <div>
-                        <label className="text-[10px] uppercase text-zinc-600 font-bold block">Status</label>
-                        <span className="font-mono text-sm text-zinc-300">{market.enabled ? 'ENABLED' : 'DISABLED'}</span>
+                        <label className="text-[10px] uppercase text-zinc-600 font-bold block">Exposure</label>
+                        <span className="font-mono text-sm text-zinc-300">
+                           ${market.liveState?.exposure || 0} / {market.max_exposure}
+                        </span>
                       </div>
                       <div>
-                        <label className="text-[10px] uppercase text-zinc-600 font-bold block">Last Update</label>
-                        <span className="font-mono text-sm text-zinc-300">{market.created_at ? new Date(market.created_at).toLocaleDateString() : '-'}</span>
+                        <label className="text-[10px] uppercase text-zinc-600 font-bold block">Confidence</label>
+                        <span className="font-mono text-sm text-zinc-300">
+                           {market.liveState?.confidence ? (market.liveState.confidence * 100).toFixed(0) : 0}%
+                        </span>
+                      </div>
+                      <div>
+                         <label className="text-[10px] uppercase text-zinc-600 font-bold block">Update</label>
+                         <span className="font-mono text-sm text-zinc-500">
+                            {market.liveState?.last_update ? new Date(market.liveState.last_update).toLocaleTimeString() : '-'}
+                         </span>
                       </div>
                    </div>
                 </div>
@@ -280,20 +351,24 @@ export const Dashboard: React.FC = () => {
 
         {/* LOGS */}
         <div className="col-span-4 space-y-4">
-           <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-4 h-[500px] flex flex-col">
+           <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-4 h-[600px] flex flex-col">
               <div className="flex items-center justify-between mb-4 border-b border-zinc-900 pb-2">
                  <h3 className="text-xs font-bold text-zinc-400 flex items-center gap-2">
-                    <Terminal size={14} /> LIVE LOGS
+                    <Terminal size={14} /> LIVE EVENTS
                  </h3>
                  {isSyncing && <RefreshCw size={12} className="text-blue-500 animate-spin" />}
               </div>
               
-              <div className="flex-1 overflow-y-auto font-mono text-[10px] space-y-1 text-zinc-500">
+              <div className="flex-1 overflow-y-auto font-mono text-[10px] space-y-1.5 text-zinc-500 pr-2">
                  {botState.logs.length === 0 ? (
                     <span className="opacity-30">Waiting for events...</span>
                  ) : (
                     botState.logs.map((log, i) => (
-                      <div key={i} className={`break-words ${log.includes('CMD') ? 'text-yellow-500/80' : 'text-zinc-500'}`}>
+                      <div key={i} className={`break-words border-l-2 pl-2 ${
+                        log.includes('INFO') ? 'border-blue-500/30' : 
+                        log.includes('WARN') ? 'border-yellow-500/30 text-yellow-500/80' : 
+                        log.includes('ERROR') ? 'border-red-500/50 text-red-500' : 'border-zinc-800'
+                      }`}>
                         {log}
                       </div>
                     ))
@@ -306,15 +381,22 @@ export const Dashboard: React.FC = () => {
 
       {/* ADD MARKET MODAL */}
       {showAddModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 animate-in fade-in duration-200">
            <div className="bg-zinc-900 border border-zinc-700 p-6 rounded-lg w-full max-w-md shadow-2xl">
               <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
                 <Plus size={20} className="text-emerald-500"/> Add New Market
               </h3>
               
+              <div className="bg-yellow-900/20 border border-yellow-700/50 p-3 rounded mb-4 flex gap-2">
+                <AlertCircle className="text-yellow-500 shrink-0" size={16} />
+                <p className="text-xs text-yellow-200/80">
+                  Ensure you paste the correct Polymarket Slug. The bot will auto-resolve the ID later.
+                </p>
+              </div>
+
               <div className="space-y-4">
                 <div>
-                  <label className="text-xs font-bold text-zinc-500 uppercase block mb-1">Polymarket Slug</label>
+                  <label className="text-xs font-bold text-zinc-500 uppercase block mb-1">Polymarket Slug / ID</label>
                   <div className="relative">
                     <Search className="absolute left-3 top-2.5 text-zinc-500" size={16} />
                     <input 
@@ -323,7 +405,7 @@ export const Dashboard: React.FC = () => {
                       value={newMarketInput}
                       onChange={(e) => setNewMarketInput(e.target.value)}
                       placeholder="e.g. btc-price-jan-2026"
-                      className="w-full bg-black border border-zinc-700 rounded p-2 pl-10 text-sm text-white focus:border-emerald-500 outline-none"
+                      className="w-full bg-black border border-zinc-700 rounded p-2 pl-10 text-sm text-white focus:border-emerald-500 outline-none placeholder:text-zinc-700"
                     />
                   </div>
                 </div>
@@ -331,13 +413,13 @@ export const Dashboard: React.FC = () => {
                 <div className="flex gap-3 pt-4">
                   <button 
                     onClick={() => setShowAddModal(false)}
-                    className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white py-2 rounded text-xs font-bold"
+                    className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white py-2 rounded text-xs font-bold transition-colors"
                   >
                     CANCEL
                   </button>
                   <button 
                     onClick={handleAddMarket}
-                    className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded text-xs font-bold flex items-center justify-center gap-2"
+                    className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded text-xs font-bold flex items-center justify-center gap-2 transition-colors"
                   >
                     {isSyncing ? <RefreshCw className="animate-spin" size={14} /> : 'CONFIRM'}
                   </button>

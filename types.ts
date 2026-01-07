@@ -44,7 +44,12 @@ export interface ControlCommand {
   timestamp: number;
 }
 
-// Simulation Types
+// UI Type: Merges Config + Live State
+export interface MarketWithState extends MarketConfig {
+  liveState?: MarketStatusRow;
+}
+
+// Simulation Types (Deprecated for Production UI but kept for ref)
 export interface PricePoint {
   timestamp: number;
   sourcePrice: number;
