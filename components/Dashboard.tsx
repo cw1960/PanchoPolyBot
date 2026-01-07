@@ -3,11 +3,13 @@ import { BotConfig, PricePoint, TradeLog } from '../types';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts';
-import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff, Copy, FolderSearch, RefreshCw } from 'lucide-react';
+import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff, Copy, FolderSearch, RefreshCw, AlertTriangle, XCircle, ArrowRight } from 'lucide-react';
 
 export const Dashboard: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
   const [activeMarket, setActiveMarket] = useState<string>('Scanning Markets...');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [newSlug, setNewSlug] = useState('');
   
   const [data, setData] = useState<PricePoint[]>([]);
   const [trades, setTrades] = useState<TradeLog[]>([]);
@@ -32,36 +34,40 @@ export const Dashboard: React.FC = () => {
     let interval: ReturnType<typeof setInterval>;
     
     const connect = () => {
-        // Close existing if open to prevent duplicates
         if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
             return;
         }
 
-        console.log("Attempting to connect to ws://localhost:8080");
         const socket = new WebSocket('ws://localhost:8080');
         ws.current = socket;
 
         socket.onopen = () => {
             setIsConnected(true);
-            console.log("Connected to Bot Backend");
+            setErrorMsg(null);
         };
 
         socket.onclose = () => {
             setIsConnected(false);
-            console.log("Disconnected.");
         };
 
         socket.onerror = (err) => {
-            console.log("WS Error", err);
             socket.close();
         };
 
         socket.onmessage = (event) => {
             const msg = JSON.parse(event.data);
             
+            // 0. Handle Errors
+            if (msg.type === 'ERROR') {
+                setErrorMsg(msg.payload.message);
+                setActiveMarket('STOPPED');
+            }
+
             // 1. Market Lock (Config Update)
             if (msg.type === 'MARKET_LOCKED') {
                 setActiveMarket(`${msg.payload.slug}`);
+                setErrorMsg(null);
+                setNewSlug(msg.payload.slug); // Sync input
                 setConfig(prev => ({
                     ...prev,
                     targetMarket: msg.payload.slug
@@ -104,7 +110,6 @@ export const Dashboard: React.FC = () => {
 
     connect();
     
-    // Aggressive Reconnection Logic (Every 1 second)
     interval = setInterval(() => {
         if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
             connect();
@@ -117,12 +122,26 @@ export const Dashboard: React.FC = () => {
     };
   }, []);
 
+  const handleUpdateSlug = () => {
+    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) return;
+    if (!newSlug.trim()) return;
+
+    setActiveMarket('Switching...');
+    setErrorMsg(null);
+    setData([]); // Clear chart
+    
+    ws.current.send(JSON.stringify({
+        type: 'UPDATE_CONFIG',
+        payload: { slug: newSlug.trim() }
+    }));
+  };
+
   const lastPoint = data.length > 0 ? data[data.length - 1] : null;
 
   return (
     <div className="h-screen flex flex-col p-4 gap-4 overflow-hidden bg-zinc-950">
       
-      {/* Real Mode Banner - Simplified */}
+      {/* Real Mode Banner / Error Banner */}
       {!isConnected && (
         <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-lg flex flex-col md:flex-row items-center justify-between gap-4 font-mono shadow-xl animate-in fade-in slide-in-from-top-4 duration-500">
             <div className="flex items-center gap-4">
@@ -135,7 +154,7 @@ export const Dashboard: React.FC = () => {
                         <span className="text-xs font-normal text-zinc-500 bg-zinc-800 px-2 py-0.5 rounded">Port 8080</span>
                     </h2>
                     <p className="text-zinc-500 text-xs">
-                        Keep your terminal open and running. The dashboard will connect automatically.
+                        Keep your terminal open. Run: <span className="text-emerald-500">node engine.mjs</span>
                     </p>
                 </div>
             </div>
@@ -143,29 +162,33 @@ export const Dashboard: React.FC = () => {
             <div className="flex items-center gap-4 w-full md:w-auto">
                  <div className="hidden md:block h-8 w-px bg-zinc-800"></div>
                  <div className="flex-1 md:flex-none">
-                       <p className="text-[10px] text-zinc-500 font-bold uppercase mb-1">Current Command</p>
                        <div className="flex items-center gap-2 bg-black/50 p-2 rounded border border-zinc-700 hover:border-emerald-500 transition-colors cursor-pointer group"
-                            onClick={() => navigator.clipboard.writeText('cd ~/Desktop/pancho-bot/backend && node bot.mjs')}>
-                           <code className="text-emerald-400 font-bold text-xs select-all">cd ~/Desktop/pancho-bot/backend && node bot.mjs</code>
+                            onClick={() => navigator.clipboard.writeText('cd ~/Desktop/pancho-bot/backend && node engine.mjs')}>
+                           <code className="text-emerald-400 font-bold text-xs select-all">cd ~/Desktop/pancho-bot/backend && node engine.mjs</code>
                            <Copy size={12} className="text-zinc-600 group-hover:text-emerald-500" />
                        </div>
                  </div>
             </div>
         </div>
       )}
-
-      {isConnected && (
-         <div className="bg-emerald-900/20 border border-emerald-800/50 p-2 rounded text-xs text-emerald-200 flex items-center justify-center gap-2 font-mono animate-in fade-in">
-            <Wifi size={14} className="text-emerald-400" />
-            <span className="font-bold">SYSTEM ONLINE:</span>
-            <span className="opacity-75">Receiving live telemetry from local engine.</span>
+      
+      {/* CRITICAL ERROR ALERT */}
+      {isConnected && errorMsg && (
+         <div className="bg-red-900/20 border border-red-500/50 p-3 rounded-lg flex items-center justify-between gap-4 font-mono animate-in fade-in slide-in-from-top-2">
+            <div className="flex items-center gap-3">
+                <AlertTriangle className="text-red-500 animate-pulse" size={20} />
+                <div>
+                    <h3 className="text-red-400 font-bold text-sm">MARKET ERROR</h3>
+                    <p className="text-red-200/70 text-xs">{errorMsg}. Please try a valid market slug.</p>
+                </div>
+            </div>
          </div>
       )}
 
       {/* Top Bar */}
       <header className={`flex justify-between items-center bg-zinc-900/50 border border-zinc-800 p-4 rounded-lg backdrop-blur-sm transition-opacity duration-500 ${!isConnected ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
         <div className="flex items-center gap-3">
-           <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_10px_#10b981]' : 'bg-red-500'}`} />
+           <div className={`w-3 h-3 rounded-full ${isConnected ? (errorMsg ? 'bg-red-500 animate-ping' : 'bg-emerald-500 shadow-[0_0_10px_#10b981]') : 'bg-red-500'}`} />
            <div className="flex flex-col">
              <h1 className="text-xl font-mono font-bold tracking-tight text-white leading-none">PANCHO<span className="text-emerald-500">POLY</span>BOT</h1>
              <span className="text-zinc-500 text-[10px] font-mono tracking-widest mt-0.5">PRODUCTION COMMAND CENTER</span>
@@ -174,8 +197,10 @@ export const Dashboard: React.FC = () => {
         
         <div className="flex items-center gap-8 text-sm font-mono">
            <div className="flex flex-col items-end opacity-80">
-             <span className="text-[10px] text-zinc-500 font-bold tracking-wider">MARKET</span>
-             <span className="text-zinc-300 font-bold text-xs truncate max-w-[200px]">{activeMarket}</span>
+             <span className="text-[10px] text-zinc-500 font-bold tracking-wider">STATUS</span>
+             <span className={`font-bold text-xs truncate max-w-[200px] ${errorMsg ? 'text-red-400' : 'text-emerald-400'}`}>
+                {activeMarket === 'STOPPED' ? 'IDLE' : 'SCANNING'}
+             </span>
            </div>
         </div>
       </header>
@@ -298,17 +323,31 @@ export const Dashboard: React.FC = () => {
                     BOT CONFIGURATION
                 </h3>
                 
-                <div className="space-y-3">
-                    <div>
-                        <label className="text-[10px] uppercase font-bold text-zinc-600">Status</label>
-                        <div className={`text-sm font-mono font-bold ${isConnected ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {isConnected ? 'ONLINE & SCANNING' : 'OFFLINE'}
+                <div className="space-y-4">
+                    <div className="space-y-2">
+                        <label className="text-[10px] uppercase font-bold text-zinc-600">Active Market Slug</label>
+                        <div className="flex gap-2">
+                            <input 
+                                type="text"
+                                value={newSlug}
+                                onChange={(e) => setNewSlug(e.target.value)}
+                                className="bg-black/50 border border-zinc-700 rounded px-2 py-1 text-xs font-mono text-zinc-300 w-full focus:outline-none focus:border-emerald-500"
+                                placeholder="e.g., bitcoin-dec-31-100k"
+                            />
+                            <button 
+                                onClick={handleUpdateSlug}
+                                className="bg-zinc-800 hover:bg-emerald-600 text-white p-1.5 rounded transition-colors"
+                            >
+                                <RefreshCw size={14} />
+                            </button>
                         </div>
+                        <p className="text-[10px] text-zinc-600">Paste a new slug above to hot-swap.</p>
                     </div>
-                    <div>
-                        <label className="text-[10px] uppercase font-bold text-zinc-600">Active Market</label>
-                        <div className="text-xs font-mono text-zinc-300 break-all">
-                            {activeMarket}
+
+                    <div className="border-t border-zinc-800 pt-3">
+                        <label className="text-[10px] uppercase font-bold text-zinc-600">Status</label>
+                        <div className={`text-sm font-mono font-bold ${isConnected ? (errorMsg ? 'text-red-500' : 'text-emerald-400') : 'text-red-400'}`}>
+                            {isConnected ? (errorMsg ? 'ERROR' : 'RUNNING') : 'OFFLINE'}
                         </div>
                     </div>
                 </div>
@@ -316,9 +355,14 @@ export const Dashboard: React.FC = () => {
 
              <div className="flex-1 bg-black border border-zinc-800 rounded-lg p-6 relative overflow-hidden flex items-center justify-center">
                  <div className="text-center space-y-4 opacity-50">
-                    <TrendingUp size={48} className="mx-auto text-zinc-700" />
+                    {errorMsg ? (
+                        <XCircle size={48} className="mx-auto text-red-700" />
+                    ) : (
+                        <TrendingUp size={48} className="mx-auto text-zinc-700" />
+                    )}
+                    
                     <p className="text-zinc-500 text-sm max-w-[200px] mx-auto">
-                        Waiting for price delta > $5.00 to trigger arbitrage execution.
+                        {errorMsg ? "Check market slug above." : "Monitoring price spread for arbitrage opportunities."}
                     </p>
                  </div>
              </div>

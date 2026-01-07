@@ -2,10 +2,10 @@
   "name": "panchopolybot-execution-engine",
   "version": "1.0.0",
   "description": "Latency arbitrage bot for Polymarket vs Binance",
-  "main": "bot.mjs",
+  "main": "engine.mjs",
   "type": "module",
   "scripts": {
-    "start": "node bot.mjs"
+    "start": "node engine.mjs"
   },
   "dependencies": {
     "ethers": "^6.11.0",
