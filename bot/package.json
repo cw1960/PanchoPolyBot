@@ -1,0 +1,22 @@
+{
+  "name": "polymarket-bot-engine",
+  "version": "1.0.0",
+  "description": "VPS-side execution engine for Polymarket automated trading",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "ethers": "^6.8.0",
+    "@supabase/supabase-js": "^2.38.4",
+    "@polymarket/clob-client": "^4.0.0",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.2.2",
+    "@types/node": "^20.8.9"
+  }
+}
