@@ -16,25 +16,18 @@ export const Dashboard: React.FC = () => {
   const [maxEntry, setMaxEntry] = useState('0.95');
   const [minDelta, setMinDelta] = useState('5.0');
   const [refPrice, setRefPrice] = useState(''); 
-  const [isUpdating, setIsUpdating] = useState(false); // Visual feedback state
+  const [isUpdating, setIsUpdating] = useState(false); 
   
   const [data, setData] = useState<PricePoint[]>([]);
   const [trades, setTrades] = useState<TradeLog[]>([]);
-  const [config, setConfig] = useState<BotConfig>({
-    sourceExchange: 'Binance',
-    targetMarket: 'Unknown',
-    triggerThreshold: 0, 
-    betSize: 0,
-    maxDailyLoss: 0,
-    latencyBufferMs: 0
-  });
+  const [systemLogs, setSystemLogs] = useState<string[]>([]); // New dedicated system log
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const ws = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [trades]);
+  }, [trades, systemLogs]);
 
   // --- REAL WEBSOCKET CONNECTION ---
   useEffect(() => {
@@ -51,6 +44,7 @@ export const Dashboard: React.FC = () => {
         socket.onopen = () => {
             setIsConnected(true);
             setErrorMsg(null);
+            setSystemLogs(prev => [...prev, `> [SYSTEM] Connected to Local Bot`]);
         };
 
         socket.onclose = () => {
@@ -65,17 +59,30 @@ export const Dashboard: React.FC = () => {
         socket.onmessage = (event) => {
             const msg = JSON.parse(event.data);
             
-            // Any message from backend stops the loading spinner
-            if (['ERROR', 'MARKET_LOCKED', 'LOG'].includes(msg.type)) {
-               // Only stop updating if it's a definitive result, LOG is just progress
-               if (msg.type !== 'LOG') setIsUpdating(false);
+            // LOG Handling
+            if (msg.type === 'LOG') {
+                setSystemLogs(prev => [...prev, `> [BOT] ${msg.payload.message}`]);
+            }
+
+            // SEARCH_COMPLETE Handling (Bot finished searching, maybe found nothing)
+            if (msg.type === 'SEARCH_COMPLETE') {
+                setIsUpdating(false);
+                if (msg.payload.found === 0) {
+                    setErrorMsg("No markets found. Check ID.");
+                    setSystemLogs(prev => [...prev, `> [ERROR] Search finished. No markets found.`]);
+                }
+            }
+
+            // Stop Spinner on definitive events
+            if (['ERROR', 'MARKET_LOCKED'].includes(msg.type)) {
+               setIsUpdating(false);
             }
 
             // 0. Handle Errors
             if (msg.type === 'ERROR') {
                 setErrorMsg(msg.payload.message);
                 setActiveMarket('STOPPED');
-                setIsUpdating(false);
+                setSystemLogs(prev => [...prev, `> [ERROR] ${msg.payload.message}`]);
             }
 
             // 1. Market Lock (Config Update)
@@ -88,10 +95,7 @@ export const Dashboard: React.FC = () => {
                     setRefPrice(msg.payload.referencePrice.toString());
                 }
                 
-                setConfig(prev => ({
-                    ...prev,
-                    targetMarket: msg.payload.slug
-                }));
+                setSystemLogs(prev => [...prev, `> [SUCCESS] Market Locked: ${msg.payload.slug}`]);
             }
             
             // 2. Real-time Price Update
@@ -124,6 +128,7 @@ export const Dashboard: React.FC = () => {
                     profit: 0
                 };
                 setTrades(prev => [...prev, newTrade]);
+                setSystemLogs(prev => [...prev, `> [TRADE] Executed ${newTrade.type} @ $${newTrade.entryPrice}`]);
             }
         };
     };
@@ -143,29 +148,45 @@ export const Dashboard: React.FC = () => {
   }, []);
 
   const handleUpdateConfig = () => {
-    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) return;
-    if (!newSlug.trim()) return;
+    // 1. Validation Feedback
+    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+        setSystemLogs(prev => [...prev, `> [ERROR] Cannot update: Bot Disconnected.`]);
+        setErrorMsg("Bot Disconnected");
+        return;
+    }
+    
+    const rawSlug = newSlug.trim();
+    if (!rawSlug) {
+        setSystemLogs(prev => [...prev, `> [WARN] Update ignored: ID field empty.`]);
+        return;
+    }
 
+    // 2. Start Process
+    setSystemLogs(prev => [...prev, `> [CMD] Searching for: ${rawSlug}...`]);
     setIsUpdating(true);
     setActiveMarket('Updating...');
     setErrorMsg(null);
-    
-    const rawSlug = newSlug.trim();
     
     if (rawSlug !== activeMarket) {
         setData([]); 
     }
     
-    ws.current.send(JSON.stringify({
-        type: 'UPDATE_CONFIG',
-        payload: { 
-            slug: rawSlug,
-            betSize: parseFloat(betSize),
-            maxEntryPrice: parseFloat(maxEntry),
-            minPriceDelta: parseFloat(minDelta),
-            referencePrice: parseFloat(refPrice)
-        }
-    }));
+    // 3. Send
+    try {
+        ws.current.send(JSON.stringify({
+            type: 'UPDATE_CONFIG',
+            payload: { 
+                slug: rawSlug,
+                betSize: parseFloat(betSize),
+                maxEntryPrice: parseFloat(maxEntry),
+                minPriceDelta: parseFloat(minDelta),
+                referencePrice: parseFloat(refPrice)
+            }
+        }));
+    } catch (e) {
+        setSystemLogs(prev => [...prev, `> [ERROR] WebSocket Send Failed.`]);
+        setIsUpdating(false);
+    }
   };
 
   const lastPoint = data.length > 0 ? data[data.length - 1] : null;
@@ -189,17 +210,6 @@ export const Dashboard: React.FC = () => {
                         2. Start: <span className="text-emerald-400 font-bold bg-zinc-800 px-1 rounded">node bot.mjs</span>
                     </p>
                 </div>
-            </div>
-            
-            <div className="flex items-center gap-4 w-full md:w-auto">
-                 <div className="hidden md:block h-8 w-px bg-zinc-800"></div>
-                 <div className="flex-1 md:flex-none">
-                       <div className="flex items-center gap-2 bg-black/50 p-2 rounded border border-zinc-700 hover:border-emerald-500 transition-colors cursor-pointer group"
-                            onClick={() => navigator.clipboard.writeText('cd ~/Desktop/pancho-bot/backend && node bot.mjs')}>
-                           <code className="text-emerald-400 font-bold text-xs select-all">cd ~/Desktop/pancho-bot/backend && node bot.mjs</code>
-                           <Copy size={12} className="text-zinc-600 group-hover:text-emerald-500" />
-                       </div>
-                 </div>
             </div>
         </div>
       )}
@@ -332,22 +342,27 @@ export const Dashboard: React.FC = () => {
              <div className="p-3 border-b border-zinc-800 bg-zinc-900/30 flex justify-between items-center z-10">
                 <h2 className="flex items-center gap-2 text-sm font-bold text-zinc-400">
                     <Terminal size={16} /> 
-                    LIVE EXECUTION LOGS
+                    SYSTEM LOGS & TRADES
                 </h2>
-                <span className="text-[10px] bg-emerald-500/10 text-emerald-500 px-2 py-0.5 rounded border border-emerald-500/20 font-mono">
-                    {trades.length} TRADES
-                </span>
              </div>
              
              <div className="flex-1 overflow-y-auto p-0 font-mono text-xs z-10">
                 <div className="p-3 space-y-1">
-                    {trades.length === 0 && (
-                        <div className="text-zinc-700 text-center mt-10 italic px-6">
-                            <div>No trades executed yet. Watching for opportunities...</div>
+                    {/* Render Mixed Logs */}
+                    {systemLogs.length === 0 && trades.length === 0 && (
+                         <div className="text-zinc-700 text-center mt-10 italic px-6">
+                            <div>Waiting for commands...</div>
                         </div>
                     )}
+                    
+                    {systemLogs.map((log, i) => (
+                        <div key={`sys-${i}`} className="text-zinc-500 border-b border-zinc-800/20 pb-1 mb-1">
+                            {log}
+                        </div>
+                    ))}
+                    
                     {trades.map((trade, i) => (
-                        <div key={i} className="group border-b border-zinc-800/50 pb-2 mb-2 last:border-0 hover:bg-white/5 p-2 rounded transition-colors bg-zinc-900/40">
+                        <div key={`trade-${i}`} className="group border-b border-zinc-800/50 pb-2 mb-2 last:border-0 hover:bg-white/5 p-2 rounded transition-colors bg-zinc-900/40">
                              <div className="flex justify-between items-center">
                                 <span className={`flex items-center gap-2 font-bold ${trade.type === 'BUY_UP' ? 'text-emerald-500' : 'text-red-500'}`}>
                                     {trade.type === 'BUY_UP' ? <ArrowUpCircle size={14}/> : <ArrowDownCircle size={14}/>}
@@ -441,7 +456,7 @@ export const Dashboard: React.FC = () => {
                     <button 
                         onClick={handleUpdateConfig}
                         disabled={isUpdating}
-                        className={`w-full text-white p-2 rounded transition-colors flex items-center justify-center gap-2 text-xs font-bold tracking-wider ${isUpdating ? 'bg-zinc-700 cursor-not-allowed' : 'bg-zinc-800 hover:bg-emerald-700'}`}
+                        className={`w-full text-white p-2 rounded transition-colors flex items-center justify-center gap-2 text-xs font-bold tracking-wider ${isUpdating ? 'bg-zinc-700 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-500'}`}
                     >
                         {isUpdating ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
                         {isUpdating ? 'SEARCHING...' : 'UPDATE CONFIGURATION'}

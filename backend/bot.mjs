@@ -10,7 +10,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v7.1 (FALLBACK + UI FEEDBACK)";
+const VERSION = "v7.5 (FINAL STABILITY)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -94,16 +94,6 @@ wss.on('connection', (ws) => {
                      
                      try {
                         await resolveMarkets([rawInput]);
-                        
-                        if (newRefPrice && activeMarkets.length > 0) {
-                            activeMarkets[0].referencePrice = newRefPrice;
-                            broadcast('MARKET_LOCKED', {
-                                slug: activeMarkets[0].slug,
-                                referencePrice: newRefPrice,
-                                upId: activeMarkets[0].upId,
-                                downId: activeMarkets[0].downId
-                            });
-                        }
                      } catch (err) {
                         console.error("Resolution Crash:", err);
                         broadcast('ERROR', { message: "Internal Resolution Error" });
@@ -164,13 +154,14 @@ function safeParse(input) {
 }
 
 async function resolveMarkets(inputs) {
+    let marketsFound = 0;
+    
     for (const rawInput of inputs) {
         if (!rawInput) continue;
 
         let cleanInput = rawInput;
         let specificId = null;
 
-        // Extract ID if looks like ID or tid param
         if (/^\d+$/.test(rawInput)) {
              specificId = rawInput;
         } else if (rawInput.includes('tid=')) {
@@ -188,21 +179,16 @@ async function resolveMarkets(inputs) {
         try {
             let targetMarket = null;
 
-            // --- STRATEGY 1: ID LOOKUP ---
             if (specificId) {
                 // A) Try as Market ID
                 try {
                     const marketRes = await axios.get(`https://gamma-api.polymarket.com/markets/${specificId}`);
-                    if (marketRes.data) {
-                        targetMarket = marketRes.data;
-                        console.log(chalk.green(`> Found directly via Market ID`));
-                    }
+                    if (marketRes.data) targetMarket = marketRes.data;
                 } catch (e) { /* Ignore */ }
 
                 // B) Try as Event ID (Fallback)
                 if (!targetMarket) {
                     try {
-                        // Check path param: events/{id}
                         const eventRes = await axios.get(`https://gamma-api.polymarket.com/events/${specificId}`);
                         if (eventRes.data) {
                              const markets = eventRes.data.markets;
@@ -210,9 +196,9 @@ async function resolveMarkets(inputs) {
                         }
                     } catch (e) { /* Ignore */ }
                 }
-
-                // C) Try as Event ID query: events?id={id}
-                if (!targetMarket) {
+                
+                // C) Try via query
+                 if (!targetMarket) {
                      try {
                         const eventResQuery = await axios.get(`https://gamma-api.polymarket.com/events?id=${specificId}`);
                         if (eventResQuery.data && eventResQuery.data.length > 0) {
@@ -223,23 +209,19 @@ async function resolveMarkets(inputs) {
                 }
             }
 
-            // --- STRATEGY 2: SLUG LOOKUP (FALLBACK FOR NUMERIC INPUTS TOO) ---
-            // Even if it was numeric, if ID lookup failed, treat it as a slug (some slugs are weird)
             if (!targetMarket) {
                 try {
-                    console.log(chalk.blue(`> ID lookup failed/skipped. Trying slug search: ${cleanInput}`));
+                    console.log(chalk.blue(`> Trying slug search: ${cleanInput}`));
                     const slugRes = await axios.get(`https://gamma-api.polymarket.com/events?slug=${cleanInput}`);
                     if (slugRes.data.length > 0) {
                         const markets = slugRes.data[0].markets;
                         targetMarket = markets[0];
-                        console.log(chalk.green(`> Found via Slug Search`));
                     }
                 } catch (e) { /* Ignore */ }
             }
 
             if (!targetMarket) {
                  console.error(chalk.red(`> Market NOT FOUND. Input: ${rawInput}`)); 
-                 broadcast('ERROR', { message: `Market Not Found (ID/Slug Invalid)` });
                  continue; 
             }
             
@@ -295,11 +277,16 @@ async function resolveMarkets(inputs) {
                 referencePrice: referencePrice, 
                 lastTrade: 0
             });
+            marketsFound++;
+
         } catch (e) { 
             console.error(chalk.red(`> Unhandled Error: ${e.message}`));
             broadcast('ERROR', { message: `System Error: ${e.message}` });
         }
     }
+
+    // Critical: Tell UI we are done, so spinner stops if nothing found.
+    broadcast('SEARCH_COMPLETE', { found: marketsFound });
 
     if (activeMarkets.length === 0) { 
         console.log(chalk.bgYellow.black("\n> SYSTEM IDLE."));
