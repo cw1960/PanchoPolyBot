@@ -1,7 +1,8 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import WebSocket, { WebSocketServer } from 'ws';
+import WebSocket from 'ws';
+import { WebSocketServer } from 'ws';
 import { ethers } from 'ethers';
 import { ClobClient, Side } from '@polymarket/clob-client';
 import chalk from 'chalk';
@@ -9,7 +10,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v6.4 (TARGET: JAN 7 2AM)";
+const VERSION = "v6.5 (FORCED MARKET OVERRIDE)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -21,8 +22,8 @@ const CONFIG = {
     minPriceDelta: parseFloat(process.env.MIN_PRICE_DELTA || '5.0'), 
     betSizeUSDC: parseFloat(process.env.BET_SIZE_USDC || '10'),
     binanceSymbol: process.env.BINANCE_SYMBOL || 'btcusdt',
-    // UPDATED: Defaults directly to your requested market
-    marketSlugs: (process.env.MARKET_SLUG || 'bitcoin-up-or-down-january-7-2am-et').split(',').map(s => s.trim()).filter(s => s),
+    // FORCE THE SLUG HERE - IGNORE .ENV TO PREVENT ERRORS
+    marketSlugs: ['bitcoin-up-or-down-january-7-2am-et'],
     rpcUrl: process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com',
 };
 
@@ -84,7 +85,7 @@ const wallet = /** @type {any} */ (new ethers.Wallet(pKey, provider));
 const clobClient = new ClobClient(
     'https://clob.polymarket.com/', 
     137, 
-    wallet, 
+    /** @type {any} */ (wallet), 
     {
         apiKey: process.env.POLY_API_KEY,
         apiSecret: process.env.POLY_API_SECRET,
