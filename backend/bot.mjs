@@ -10,7 +10,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v7.0 (AUTO-DETECT EVENT ID)";
+const VERSION = "v7.1 (FALLBACK + UI FEEDBACK)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -89,7 +89,7 @@ wss.on('connection', (ws) => {
 
                 if (rawInput) {
                      console.log(chalk.magenta(`  Resolving: ${rawInput}`));
-                     broadcast('LOG', { message: `Searching for ${rawInput}...` });
+                     broadcast('LOG', { message: `Resolving ${rawInput}...` });
                      activeMarkets = [];
                      
                      try {
@@ -182,8 +182,8 @@ async function resolveMarkets(inputs) {
             cleanInput = rawInput.split('?')[0].trim();
         }
 
-        console.log(chalk.yellow(`> Resolving Strategy for: ${cleanInput} / ID: ${specificId}`));
-        broadcast('LOG', { message: `Querying API...` });
+        console.log(chalk.yellow(`> Resolving: ${cleanInput} (ID: ${specificId || 'N/A'})`));
+        broadcast('LOG', { message: `Checking API...` });
 
         try {
             let targetMarket = null;
@@ -197,62 +197,66 @@ async function resolveMarkets(inputs) {
                         targetMarket = marketRes.data;
                         console.log(chalk.green(`> Found directly via Market ID`));
                     }
-                } catch (e) { /* Ignore 404 */ }
+                } catch (e) { /* Ignore */ }
 
                 // B) Try as Event ID (Fallback)
                 if (!targetMarket) {
                     try {
-                        console.log(chalk.blue(`> Market ID failed. Checking if ID is an EVENT ID...`));
-                        const eventRes = await axios.get(`https://gamma-api.polymarket.com/events?id=${specificId}`);
-                        if (eventRes.data && eventRes.data.length > 0) {
-                            const markets = eventRes.data[0].markets;
-                            if (markets && markets.length > 0) {
-                                // If exact match failed, assume the user gave the Event ID and wants the first market
-                                targetMarket = markets[0]; 
-                                console.log(chalk.green(`> Found Event! Auto-selecting first market: ${targetMarket.id}`));
-                            }
+                        // Check path param: events/{id}
+                        const eventRes = await axios.get(`https://gamma-api.polymarket.com/events/${specificId}`);
+                        if (eventRes.data) {
+                             const markets = eventRes.data.markets;
+                             if (markets && markets.length > 0) targetMarket = markets[0];
                         }
                     } catch (e) { /* Ignore */ }
                 }
+
+                // C) Try as Event ID query: events?id={id}
+                if (!targetMarket) {
+                     try {
+                        const eventResQuery = await axios.get(`https://gamma-api.polymarket.com/events?id=${specificId}`);
+                        if (eventResQuery.data && eventResQuery.data.length > 0) {
+                             const markets = eventResQuery.data[0].markets;
+                             if (markets && markets.length > 0) targetMarket = markets[0];
+                        }
+                     } catch(e) { /* Ignore */ }
+                }
             }
 
-            // --- STRATEGY 2: SLUG LOOKUP ---
-            if (!targetMarket && !/^\d+$/.test(cleanInput)) {
+            // --- STRATEGY 2: SLUG LOOKUP (FALLBACK FOR NUMERIC INPUTS TOO) ---
+            // Even if it was numeric, if ID lookup failed, treat it as a slug (some slugs are weird)
+            if (!targetMarket) {
                 try {
+                    console.log(chalk.blue(`> ID lookup failed/skipped. Trying slug search: ${cleanInput}`));
                     const slugRes = await axios.get(`https://gamma-api.polymarket.com/events?slug=${cleanInput}`);
                     if (slugRes.data.length > 0) {
                         const markets = slugRes.data[0].markets;
-                        // If specificId exists but wasn't found as Event/Market earlier, try to find inside slug results?
-                        // Generally if we are here, just take the first market
                         targetMarket = markets[0];
+                        console.log(chalk.green(`> Found via Slug Search`));
                     }
                 } catch (e) { /* Ignore */ }
             }
 
             if (!targetMarket) {
                  console.error(chalk.red(`> Market NOT FOUND. Input: ${rawInput}`)); 
-                 broadcast('ERROR', { message: `Market/Event ID Not Found` });
+                 broadcast('ERROR', { message: `Market Not Found (ID/Slug Invalid)` });
                  continue; 
             }
             
             if (targetMarket.closed) {
                  console.error(chalk.red(`> Market CLOSED.`)); 
-                 broadcast('ERROR', { message: `Market Closed` });
+                 broadcast('ERROR', { message: `Market is Closed` });
                  continue; 
             }
 
-            // --- TOKEN PARSING (ROBUST) ---
             const outcomes = safeParse(targetMarket.outcomes);
             let tokenIds = safeParse(targetMarket.clobTokenIds);
 
-            // Fallback: If clobTokenIds is missing, check 'tokens' array
             if ((!tokenIds || tokenIds.length === 0) && targetMarket.tokens) {
-                 console.log(chalk.gray(`> Using 'tokens' array fallback...`));
                  tokenIds = targetMarket.tokens.map(t => t.tokenId);
             }
 
             if (!outcomes || !tokenIds || outcomes.length !== tokenIds.length) {
-                console.error(chalk.red(`> Data Structure Mismatch. Outcomes: ${outcomes?.length}, Tokens: ${tokenIds?.length}`));
                 broadcast('ERROR', { message: `Data Parsing Error (Tokens)` });
                 continue;
             }
@@ -267,7 +271,6 @@ async function resolveMarkets(inputs) {
             });
 
             if (!upTokenId || !downTokenId) {
-                console.error(chalk.red(`> Could not identify Yes/No or Up/Down tokens.`));
                 broadcast('ERROR', { message: `Tokens Not Compatible` });
                 continue;
             }
@@ -276,7 +279,7 @@ async function resolveMarkets(inputs) {
             let referencePrice = await getBinanceOpenPrice(startTs);
             if (!referencePrice) referencePrice = 0; 
             
-            console.log(chalk.green(`> LOCKED: ${targetMarket.id} [${targetMarket.slug}]`));
+            console.log(chalk.green(`> LOCKED: ${targetMarket.id}`));
             
             broadcast('MARKET_LOCKED', {
                 slug: targetMarket.slug || rawInput, 
@@ -374,7 +377,6 @@ async function checkArbitrage(spotPrice) {
             
             if (bestAsk <= CONFIG.maxEntryPrice) {
                 console.log(chalk.bgGreen.black(`\n SNIPE SIGNAL `));
-                console.log(`Delta: ${delta.toFixed(2)} | Target: ${direction} | Price: ${bestAsk}`);
                 
                 broadcast('SNIPE_SIGNAL', {
                     direction: direction,

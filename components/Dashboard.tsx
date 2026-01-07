@@ -15,7 +15,8 @@ export const Dashboard: React.FC = () => {
   const [betSize, setBetSize] = useState('10');
   const [maxEntry, setMaxEntry] = useState('0.95');
   const [minDelta, setMinDelta] = useState('5.0');
-  const [refPrice, setRefPrice] = useState(''); // Manual Override
+  const [refPrice, setRefPrice] = useState(''); 
+  const [isUpdating, setIsUpdating] = useState(false); // Visual feedback state
   
   const [data, setData] = useState<PricePoint[]>([]);
   const [trades, setTrades] = useState<TradeLog[]>([]);
@@ -54,6 +55,7 @@ export const Dashboard: React.FC = () => {
 
         socket.onclose = () => {
             setIsConnected(false);
+            setIsUpdating(false);
         };
 
         socket.onerror = (err) => {
@@ -63,21 +65,25 @@ export const Dashboard: React.FC = () => {
         socket.onmessage = (event) => {
             const msg = JSON.parse(event.data);
             
+            // Any message from backend stops the loading spinner
+            if (['ERROR', 'MARKET_LOCKED', 'LOG'].includes(msg.type)) {
+               // Only stop updating if it's a definitive result, LOG is just progress
+               if (msg.type !== 'LOG') setIsUpdating(false);
+            }
+
             // 0. Handle Errors
             if (msg.type === 'ERROR') {
                 setErrorMsg(msg.payload.message);
                 setActiveMarket('STOPPED');
+                setIsUpdating(false);
             }
 
             // 1. Market Lock (Config Update)
             if (msg.type === 'MARKET_LOCKED') {
                 setActiveMarket(`${msg.payload.slug}`);
                 setErrorMsg(null);
-                
-                // Sync UI with what the bot reports
                 setNewSlug(msg.payload.slug); 
                 
-                // Set Ref Price only if it's not currently being edited by user (or if it's empty)
                 if (msg.payload.referencePrice) {
                     setRefPrice(msg.payload.referencePrice.toString());
                 }
@@ -140,13 +146,12 @@ export const Dashboard: React.FC = () => {
     if (!ws.current || ws.current.readyState !== WebSocket.OPEN) return;
     if (!newSlug.trim()) return;
 
+    setIsUpdating(true);
     setActiveMarket('Updating...');
     setErrorMsg(null);
     
-    // SEND THE FULL STRING (ID OR SLUG)
     const rawSlug = newSlug.trim();
     
-    // If market slug changed, clear chart for visual clarity
     if (rawSlug !== activeMarket) {
         setData([]); 
     }
@@ -198,19 +203,6 @@ export const Dashboard: React.FC = () => {
             </div>
         </div>
       )}
-      
-      {/* CRITICAL ERROR ALERT */}
-      {isConnected && errorMsg && (
-         <div className="bg-red-900/20 border border-red-500/50 p-3 rounded-lg flex items-center justify-between gap-4 font-mono animate-in fade-in slide-in-from-top-2">
-            <div className="flex items-center gap-3">
-                <AlertTriangle className="text-red-500 animate-pulse" size={20} />
-                <div>
-                    <h3 className="text-red-400 font-bold text-sm">MARKET ERROR</h3>
-                    <p className="text-red-200/70 text-xs">{errorMsg}. Please try a valid Market ID.</p>
-                </div>
-            </div>
-         </div>
-      )}
 
       {/* Top Bar */}
       <header className={`flex justify-between items-center bg-zinc-900/50 border border-zinc-800 p-4 rounded-lg backdrop-blur-sm transition-opacity duration-500 ${!isConnected ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
@@ -226,7 +218,7 @@ export const Dashboard: React.FC = () => {
            <div className="flex flex-col items-end opacity-80">
              <span className="text-[10px] text-zinc-500 font-bold tracking-wider">STATUS</span>
              <span className={`font-bold text-xs truncate max-w-[200px] ${activeMarket === 'STOPPED' || errorMsg ? 'text-red-400' : (activeMarket === 'Updating...' ? 'text-yellow-400' : 'text-emerald-400')}`}>
-                {activeMarket === 'STOPPED' ? 'IDLE' : activeMarket === 'Scanning Markets...' ? 'INITIALIZING' : activeMarket === 'Updating...' ? 'SEARCHING...' : 'RUNNING'}
+                {activeMarket === 'STOPPED' ? (errorMsg ? 'ERROR' : 'IDLE') : activeMarket === 'Scanning Markets...' ? 'INITIALIZING' : activeMarket === 'Updating...' ? 'SEARCHING...' : 'RUNNING'}
              </span>
            </div>
         </div>
@@ -276,20 +268,32 @@ export const Dashboard: React.FC = () => {
                    </div>
                )}
                
+               {/* OVERLAY: ERROR or IDLE */}
                {isConnected && (activeMarket === 'STOPPED' || activeMarket === 'Scanning Markets...') && (
                    <div className="absolute inset-0 flex items-center justify-center z-20 bg-black/80 backdrop-blur-md">
-                       <div className="text-center p-8 border border-zinc-800 rounded-lg bg-zinc-950 shadow-2xl">
-                           <div className="bg-yellow-900/20 p-4 rounded-full w-fit mx-auto mb-4">
-                             <Link className="w-8 h-8 text-yellow-500 animate-pulse" />
-                           </div>
-                           <h3 className="text-xl font-bold text-white mb-2">System Idle</h3>
-                           <p className="text-zinc-400 text-sm mb-6 max-w-md mx-auto">
-                               The bot is connected but has no active market configured. 
-                               Please enter a <span className="text-emerald-400 font-mono">Market ID</span> (TID) from the URL.
-                           </p>
-                           <div className="text-xs text-zinc-600 font-mono bg-zinc-900 p-2 rounded">
-                               e.g. 1767803541594
-                           </div>
+                       <div className={`text-center p-8 border ${errorMsg ? 'border-red-900 bg-red-950/20' : 'border-zinc-800 bg-zinc-950'} rounded-lg shadow-2xl transition-all duration-300`}>
+                           {errorMsg ? (
+                               <>
+                                   <div className="bg-red-900/20 p-4 rounded-full w-fit mx-auto mb-4 animate-bounce">
+                                     <XCircle className="w-8 h-8 text-red-500" />
+                                   </div>
+                                   <h3 className="text-xl font-bold text-red-500 mb-2">Configuration Error</h3>
+                                   <p className="text-red-200 text-sm mb-2 max-w-md mx-auto font-mono">
+                                       {errorMsg}
+                                   </p>
+                                   <p className="text-zinc-500 text-xs">Try a different Market ID or Slug.</p>
+                               </>
+                           ) : (
+                               <>
+                                   <div className="bg-yellow-900/20 p-4 rounded-full w-fit mx-auto mb-4">
+                                     <Link className="w-8 h-8 text-yellow-500 animate-pulse" />
+                                   </div>
+                                   <h3 className="text-xl font-bold text-white mb-2">System Idle</h3>
+                                   <p className="text-zinc-400 text-sm mb-6 max-w-md mx-auto">
+                                       Enter a <span className="text-emerald-400 font-mono">Market ID</span> (e.g. 123456...) in the configuration panel.
+                                   </p>
+                               </>
+                           )}
                        </div>
                    </div>
                )}
@@ -300,7 +304,7 @@ export const Dashboard: React.FC = () => {
                            <Loader2 className="w-12 h-12 text-yellow-500 animate-spin mx-auto mb-4" />
                            <h3 className="text-xl font-bold text-white mb-2">Searching Market...</h3>
                            <p className="text-zinc-400 text-sm font-mono">
-                               Resolving ID: <span className="text-emerald-400">{newSlug}</span>
+                               Resolving: <span className="text-emerald-400">{newSlug}</span>
                            </p>
                        </div>
                    </div>
@@ -316,17 +320,8 @@ export const Dashboard: React.FC = () => {
                     labelFormatter={() => ''}
                     formatter={(value: number) => [`$${value.toFixed(2)}`, 'Price']}
                   />
-                  {/* Reference Line (Dynamic based on data) */}
                   {lastPoint && <ReferenceLine y={lastPoint.targetPrice} stroke="#71717a" strokeDasharray="3 3" />}
-                  
-                  <Line 
-                    type="monotone" 
-                    dataKey="sourcePrice" 
-                    stroke="#10b981" 
-                    strokeWidth={2} 
-                    dot={false}
-                    isAnimationActive={false} 
-                  />
+                  <Line type="monotone" dataKey="sourcePrice" stroke="#10b981" strokeWidth={2} dot={false} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -445,10 +440,11 @@ export const Dashboard: React.FC = () => {
                     {/* Apply Button */}
                     <button 
                         onClick={handleUpdateConfig}
-                        className="w-full bg-zinc-800 hover:bg-emerald-700 text-white p-2 rounded transition-colors flex items-center justify-center gap-2 text-xs font-bold tracking-wider"
+                        disabled={isUpdating}
+                        className={`w-full text-white p-2 rounded transition-colors flex items-center justify-center gap-2 text-xs font-bold tracking-wider ${isUpdating ? 'bg-zinc-700 cursor-not-allowed' : 'bg-zinc-800 hover:bg-emerald-700'}`}
                     >
-                        <Save size={14} />
-                        UPDATE CONFIGURATION
+                        {isUpdating ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                        {isUpdating ? 'SEARCHING...' : 'UPDATE CONFIGURATION'}
                     </button>
 
                     <div className="border-t border-zinc-800 pt-3 flex justify-between items-center">
@@ -459,7 +455,8 @@ export const Dashboard: React.FC = () => {
                     </div>
                 </div>
              </div>
-
+             
+             {/* Status Box */}
              <div className="flex-1 bg-black border border-zinc-800 rounded-lg p-6 relative overflow-hidden flex items-center justify-center">
                  <div className="text-center space-y-4 opacity-50">
                     {errorMsg ? (
@@ -469,7 +466,7 @@ export const Dashboard: React.FC = () => {
                     )}
                     
                     <p className="text-zinc-500 text-sm max-w-[200px] mx-auto">
-                        {errorMsg ? "Check market ID above." : "Monitoring price spread for arbitrage opportunities."}
+                        {errorMsg ? "Bot failed to lock market." : "Monitoring price spread for arbitrage opportunities."}
                     </p>
                  </div>
              </div>
