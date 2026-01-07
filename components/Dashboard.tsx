@@ -148,20 +148,18 @@ export const Dashboard: React.FC = () => {
     setActiveMarket('Updating...');
     setErrorMsg(null);
     
-    // Auto-clean the slug before sending (removing ?tid=...)
-    // This is the critical fix for copy-pasted URLs
-    const cleanSlug = newSlug.trim().split('?')[0];
-    setNewSlug(cleanSlug); 
+    // SEND THE FULL SLUG (DO NOT STRIP TID)
+    const rawSlug = newSlug.trim();
     
     // If market slug changed, clear chart for visual clarity
-    if (cleanSlug !== activeMarket) {
+    if (rawSlug !== activeMarket) {
         setData([]); 
     }
     
     ws.current.send(JSON.stringify({
         type: 'UPDATE_CONFIG',
         payload: { 
-            slug: cleanSlug,
+            slug: rawSlug,
             betSize: parseFloat(betSize),
             maxEntryPrice: parseFloat(maxEntry),
             minPriceDelta: parseFloat(minDelta),
@@ -295,7 +293,7 @@ export const Dashboard: React.FC = () => {
                                Please find a valid <span className="text-emerald-400 font-mono">Market Slug</span> from Polymarket and enter it in the configuration panel on the right.
                            </p>
                            <div className="text-xs text-zinc-600 font-mono bg-zinc-900 p-2 rounded">
-                               e.g. bitcoin-price-jan-8-2025
+                               e.g. bitcoin-price-jan-8-2025?tid=123...
                            </div>
                        </div>
                    </div>

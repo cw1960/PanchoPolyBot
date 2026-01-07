@@ -10,7 +10,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v6.11 (SINGLE FILE FIX)";
+const VERSION = "v6.12 (TID AWARE FIX)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -76,8 +76,8 @@ wss.on('connection', (ws) => {
                 if (maxEntryPrice !== undefined) CONFIG.maxEntryPrice = parseFloat(maxEntryPrice);
                 if (minPriceDelta !== undefined) CONFIG.minPriceDelta = parseFloat(minPriceDelta);
 
-                // Sanitize slug just in case UI didn't catch it
-                const newSlug = slug ? slug.trim().split('?')[0] : null;
+                // Receive RAW slug (potentially with ?tid=...)
+                const rawSlug = slug;
                 const newRefPrice = referencePrice ? parseFloat(referencePrice) : null;
                 
                 console.log(chalk.magenta(`\n> UI CONFIG UPDATE:`));
@@ -85,31 +85,33 @@ wss.on('connection', (ws) => {
                 console.log(chalk.dim(`  Max Entry: $${CONFIG.maxEntryPrice}`));
                 console.log(chalk.dim(`  Min Delta: $${CONFIG.minPriceDelta}`));
 
-                // 2. Handle Ref Price Override (Critical for accuracy)
-                if (newRefPrice && activeMarkets.length > 0 && (!newSlug || newSlug === activeMarkets[0].slug)) {
+                // 2. Handle Ref Price Override
+                if (newRefPrice && activeMarkets.length > 0) {
+                    // If we are just updating the SAME market, apply ref price immediately
+                    // But if slugs differ, we need to re-resolve first
                     activeMarkets[0].referencePrice = newRefPrice;
-                    console.log(chalk.yellow(`  Updated Ref Price to: $${newRefPrice} (Manual Override)`));
-                    
-                    // Re-broadcast lock to confirm to UI
-                    broadcast('MARKET_LOCKED', {
-                        slug: activeMarkets[0].slug,
-                        referencePrice: newRefPrice,
-                        upId: activeMarkets[0].upId,
-                        downId: activeMarkets[0].downId
-                    });
                 }
 
-                // 3. Handle Market Switch if Slug Changed
-                if (newSlug && (activeMarkets.length === 0 || newSlug !== activeMarkets[0].slug)) {
-                     console.log(chalk.magenta(`  Switching Market: ${newSlug}`));
-                     broadcast('LOG', { message: `Reconfiguring for ${newSlug}...` });
+                // 3. Resolve New Market (Always resolve if slug is sent, to be safe)
+                if (rawSlug) {
+                     console.log(chalk.magenta(`  Processing Market: ${rawSlug}`));
+                     broadcast('LOG', { message: `Reconfiguring for ${rawSlug}...` });
                      
                      // Reset state
                      activeMarkets = [];
-                     CONFIG.marketSlugs = [newSlug];
+                     CONFIG.marketSlugs = [rawSlug];
                      await resolveMarkets(CONFIG.marketSlugs);
-                } else {
-                     broadcast('LOG', { message: `Strategy Updated` });
+                     
+                     // Re-apply ref price override if one was sent and successful resolve
+                     if (newRefPrice && activeMarkets.length > 0) {
+                         activeMarkets[0].referencePrice = newRefPrice;
+                          broadcast('MARKET_LOCKED', {
+                            slug: activeMarkets[0].slug,
+                            referencePrice: newRefPrice,
+                            upId: activeMarkets[0].upId,
+                            downId: activeMarkets[0].downId
+                        });
+                     }
                 }
             }
         } catch (e) {
@@ -158,80 +160,113 @@ async function getBinanceOpenPrice(timestampMs) {
 }
 
 async function resolveMarkets(rawSlugs) {
-    // SANITIZE: Remove query params from slugs (e.g. ?tid=...)
-    const slugs = rawSlugs.map(s => s.split('?')[0].trim());
+    // DO NOT aggressively split everything. Handle 'tid' param.
+    
+    for (const rawSlug of rawSlugs) {
+        let cleanSlug = rawSlug;
+        let specificTid = null;
 
-    console.log(chalk.yellow(`> Resolving: ${JSON.stringify(slugs)}`));
-    broadcast('LOG', { message: `Resolving ${slugs.length} markets...` });
+        if (rawSlug.includes('tid=')) {
+            // Extract TID if present
+            const parts = rawSlug.split('?');
+            cleanSlug = parts[0].trim();
+            const urlParams = new URLSearchParams(parts[1]);
+            specificTid = urlParams.get('tid');
+        } else {
+            cleanSlug = rawSlug.split('?')[0].trim();
+        }
 
-    for (const slug of slugs) {
+        console.log(chalk.yellow(`> Resolving: ${cleanSlug} (TID: ${specificTid || 'None'})`));
+        broadcast('LOG', { message: `Resolving ${cleanSlug}...` });
+
         try {
-            const response = await axios.get(`https://gamma-api.polymarket.com/events?slug=${slug}`);
+            const response = await axios.get(`https://gamma-api.polymarket.com/events?slug=${cleanSlug}`);
             if (response.data.length === 0) { 
-                console.error(chalk.red(`> Market not found: ${slug}`)); 
-                broadcast('ERROR', { message: `Market Not Found: ${slug}` });
+                console.error(chalk.red(`> Market not found: ${cleanSlug}`)); 
+                broadcast('ERROR', { message: `Market Not Found: ${cleanSlug}` });
                 continue; 
             }
 
-            const market = response.data[0].markets[0];
+            // The 'event' object
+            const eventData = response.data[0];
+            const markets = eventData.markets;
+
+            let targetMarket = null;
+
+            if (specificTid) {
+                // User provided a specific ID, filter for it
+                targetMarket = markets.find(m => m.id === specificTid || (m.clobTokenIds && JSON.stringify(m.clobTokenIds).includes(specificTid)));
+                if (!targetMarket) {
+                     console.error(chalk.red(`> TID ${specificTid} not found in event.`)); 
+                     broadcast('ERROR', { message: `TID ${specificTid} Not Found` });
+                     continue;
+                }
+            } else {
+                // Default to first market if no TID (dangerous for these 15m markets, but standard behavior)
+                targetMarket = markets[0];
+            }
             
-            if (market.closed) {
-                 console.error(chalk.red(`> SKIPPING: ${slug} is already CLOSED.`)); 
-                 broadcast('ERROR', { message: `Market Closed: ${slug}` });
+            if (targetMarket.closed) {
+                 console.error(chalk.red(`> SKIPPING: ${cleanSlug} is already CLOSED.`)); 
+                 broadcast('ERROR', { message: `Market Closed` });
                  continue; 
             }
 
             let upTokenId = null; 
             let downTokenId = null;
             
-            let tokenIds = market.clobTokenIds;
+            let tokenIds = targetMarket.clobTokenIds;
             if (typeof tokenIds === 'string') {
                 try { tokenIds = JSON.parse(tokenIds); } catch(e) {}
             }
             
-            const outcomes = JSON.parse(market.outcomes);
+            const outcomes = JSON.parse(targetMarket.outcomes);
             outcomes.forEach((outcomeName, index) => {
                 const name = outcomeName.toUpperCase();
-                if (name === 'UP') upTokenId = tokenIds[index];
-                if (name === 'DOWN') downTokenId = tokenIds[index];
+                // Handle BOTH 'UP'/'DOWN' and 'YES'/'NO'
+                if (name === 'UP' || name === 'YES') upTokenId = tokenIds[index];
+                if (name === 'DOWN' || name === 'NO') downTokenId = tokenIds[index];
             });
 
             if (!upTokenId || !downTokenId) {
-                console.error(chalk.red(`> Could not identify UP/DOWN tokens for ${slug}`));
+                console.error(chalk.red(`> Could not identify UP/DOWN/YES/NO tokens for ${cleanSlug}`));
+                broadcast('ERROR', { message: `Tokens Not Found` });
                 continue;
             }
             
-            const startTs = new Date(market.startDate).getTime();
+            const startTs = new Date(targetMarket.startDate).getTime();
             
             let referencePrice = await getBinanceOpenPrice(startTs);
             if (!referencePrice) {
-                 console.log(chalk.red(`> Could not fetch reference price for ${slug}`));
-                 broadcast('ERROR', { message: `Binance Price Not Found for Start Time` });
-                 continue;
+                 console.log(chalk.red(`> Could not fetch reference price for ${cleanSlug}`));
+                 // Don't error out, maybe user will provide override
+                 referencePrice = 0; 
             }
             
-            console.log(chalk.green(`> LOCKED: ${slug} | Ref: $${referencePrice}`));
+            console.log(chalk.green(`> LOCKED: ${cleanSlug} | TID: ${targetMarket.id}`));
             
             broadcast('MARKET_LOCKED', {
-                slug: slug,
+                slug: rawSlug, // Return the full slug to UI so input doesn't flicker
                 referencePrice: referencePrice,
                 upId: upTokenId,
                 downId: downTokenId
             });
 
             activeMarkets.push({
-                slug: slug, upId: upTokenId, downId: downTokenId, referencePrice: referencePrice, lastTrade: 0
+                slug: rawSlug, 
+                upId: upTokenId, 
+                downId: downTokenId, 
+                referencePrice: referencePrice, 
+                lastTrade: 0
             });
         } catch (e) { 
-            console.error(chalk.red(`> Error resolving ${slug}: ${e.message}`));
+            console.error(chalk.red(`> Error resolving ${cleanSlug}: ${e.message}`));
             broadcast('ERROR', { message: `API Error: ${e.message}` });
         }
     }
 
     if (activeMarkets.length === 0) { 
-        console.log(chalk.bgYellow.black("\n> SYSTEM IDLE: No open markets found in initial config."));
-        console.log(chalk.yellow("> ACTION REQUIRED: Go to the Dashboard (http://localhost:3000)"));
-        console.log(chalk.yellow("> Enter a valid 'Market Slug' and click Update to start."));
+        console.log(chalk.bgYellow.black("\n> SYSTEM IDLE: No open markets found."));
     } else {
         console.log(chalk.blue(`> Engine Ready. Streaming...`));
         startTrading();
