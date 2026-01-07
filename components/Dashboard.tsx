@@ -38,8 +38,9 @@ export const Dashboard: React.FC = () => {
 
   const fetchData = async () => {
     try {
-      // A. Check Credentials
-      if ((supabase as any).supabaseUrl.includes('INSERT')) {
+      // A. Check Credentials (Case insensitive check for placeholder)
+      const currentUrl = (supabase as any).supabaseUrl || '';
+      if (currentUrl.toLowerCase().includes('insert')) {
         setConfigError(true);
         return;
       }
@@ -85,6 +86,7 @@ export const Dashboard: React.FC = () => {
 
     } catch (err) {
       console.error("Polling Error:", err);
+      // Optional: handle connection errors gracefully
     }
   };
 
@@ -146,7 +148,7 @@ export const Dashboard: React.FC = () => {
           <p className="text-red-200 mb-6">
             Please update <code>services/supabaseClient.ts</code> with your actual Supabase URL and API Key.
           </p>
-          <div className="bg-black/50 p-4 rounded text-left font-mono text-xs text-zinc-500">
+          <div className="bg-black/50 p-4 rounded text-left font-mono text-xs text-zinc-500 break-all">
             src/services/supabaseClient.ts
           </div>
         </div>
