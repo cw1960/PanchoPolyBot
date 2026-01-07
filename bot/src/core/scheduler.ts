@@ -7,7 +7,7 @@
  */
 
 export class Scheduler {
-  private intervalId: NodeJS.Timeout | null = null;
+  private intervalId: any | null = null;
 
   constructor() {
     // Intentionally empty

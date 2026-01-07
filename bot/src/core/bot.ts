@@ -30,12 +30,12 @@ export class BotEngine {
       console.log("Bot Engine Started Successfully.");
     } catch (error) {
       console.error("Failed to start Bot Engine:", error);
-      process.exit(1);
+      (process as any).exit(1);
     }
   }
 
   public async stop() {
     console.log("Stopping Bot Engine...");
-    process.exit(0);
+    (process as any).exit(0);
   }
 }
