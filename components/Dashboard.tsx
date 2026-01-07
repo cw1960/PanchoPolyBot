@@ -3,13 +3,18 @@ import { BotConfig, PricePoint, TradeLog } from '../types';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts';
-import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff, Copy, FolderSearch, RefreshCw, AlertTriangle, XCircle, ArrowRight } from 'lucide-react';
+import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff, Copy, FolderSearch, RefreshCw, AlertTriangle, XCircle, ArrowRight, Save } from 'lucide-react';
 
 export const Dashboard: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
   const [activeMarket, setActiveMarket] = useState<string>('Scanning Markets...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  
+  // Configuration State
   const [newSlug, setNewSlug] = useState('bitcoin-up-or-down-january-7-2am-et');
+  const [betSize, setBetSize] = useState('10');
+  const [maxEntry, setMaxEntry] = useState('0.95');
+  const [minDelta, setMinDelta] = useState('5.0');
   
   const [data, setData] = useState<PricePoint[]>([]);
   const [trades, setTrades] = useState<TradeLog[]>([]);
@@ -67,11 +72,19 @@ export const Dashboard: React.FC = () => {
             if (msg.type === 'MARKET_LOCKED') {
                 setActiveMarket(`${msg.payload.slug}`);
                 setErrorMsg(null);
-                setNewSlug(msg.payload.slug); // Sync input
+                
+                // Sync UI with what the bot reports (optional, but good for confirmation)
+                setNewSlug(msg.payload.slug); 
+                
                 setConfig(prev => ({
                     ...prev,
                     targetMarket: msg.payload.slug
                 }));
+            }
+            
+            // 1.5 Config Update Log
+            if (msg.type === 'LOG' && msg.payload.message.includes('Config Updated')) {
+               // Optional: Show a toast or flash success
             }
 
             // 2. Real-time Price Update
@@ -122,17 +135,26 @@ export const Dashboard: React.FC = () => {
     };
   }, []);
 
-  const handleUpdateSlug = () => {
+  const handleUpdateConfig = () => {
     if (!ws.current || ws.current.readyState !== WebSocket.OPEN) return;
     if (!newSlug.trim()) return;
 
-    setActiveMarket('Switching...');
+    setActiveMarket('Updating...');
     setErrorMsg(null);
-    setData([]); // Clear chart
+    
+    // If market slug changed, clear chart for visual clarity
+    if (newSlug.trim() !== activeMarket) {
+        setData([]); 
+    }
     
     ws.current.send(JSON.stringify({
         type: 'UPDATE_CONFIG',
-        payload: { slug: newSlug.trim() }
+        payload: { 
+            slug: newSlug.trim(),
+            betSize: parseFloat(betSize),
+            maxEntryPrice: parseFloat(maxEntry),
+            minPriceDelta: parseFloat(minDelta)
+        }
     }));
   };
 
@@ -324,28 +346,59 @@ export const Dashboard: React.FC = () => {
                 </h3>
                 
                 <div className="space-y-4">
-                    <div className="space-y-2">
-                        <label className="text-[10px] uppercase font-bold text-zinc-600">Active Market Slug</label>
-                        <div className="flex gap-2">
+                    {/* Strategy Parameters */}
+                    <div className="grid grid-cols-3 gap-2">
+                        <div className="space-y-1">
+                            <label className="text-[9px] uppercase font-bold text-zinc-600">Bet Size ($)</label>
                             <input 
-                                type="text"
-                                value={newSlug}
-                                onChange={(e) => setNewSlug(e.target.value)}
-                                className="bg-black/50 border border-zinc-700 rounded px-2 py-1 text-xs font-mono text-zinc-300 w-full focus:outline-none focus:border-emerald-500"
-                                placeholder="e.g., bitcoin-dec-31-100k"
+                                type="number" 
+                                value={betSize} 
+                                onChange={(e) => setBetSize(e.target.value)} 
+                                className="bg-black/50 border border-zinc-700 rounded px-2 py-1.5 text-xs font-mono text-emerald-300 w-full focus:outline-none focus:border-emerald-500" 
                             />
-                            <button 
-                                onClick={handleUpdateSlug}
-                                className="bg-zinc-800 hover:bg-emerald-600 text-white p-1.5 rounded transition-colors"
-                            >
-                                <RefreshCw size={14} />
-                            </button>
                         </div>
-                        <p className="text-[10px] text-zinc-600">Paste a new slug above to hot-swap.</p>
+                        <div className="space-y-1">
+                            <label className="text-[9px] uppercase font-bold text-zinc-600">Max Entry ($)</label>
+                            <input 
+                                type="number" 
+                                value={maxEntry} 
+                                onChange={(e) => setMaxEntry(e.target.value)} 
+                                className="bg-black/50 border border-zinc-700 rounded px-2 py-1.5 text-xs font-mono text-yellow-300 w-full focus:outline-none focus:border-emerald-500" 
+                            />
+                        </div>
+                         <div className="space-y-1">
+                            <label className="text-[9px] uppercase font-bold text-zinc-600">Min Delta ($)</label>
+                            <input 
+                                type="number" 
+                                value={minDelta} 
+                                onChange={(e) => setMinDelta(e.target.value)} 
+                                className="bg-black/50 border border-zinc-700 rounded px-2 py-1.5 text-xs font-mono text-blue-300 w-full focus:outline-none focus:border-emerald-500" 
+                            />
+                        </div>
                     </div>
 
-                    <div className="border-t border-zinc-800 pt-3">
-                        <label className="text-[10px] uppercase font-bold text-zinc-600">Status</label>
+                    {/* Slug Input */}
+                    <div className="space-y-2">
+                        <label className="text-[10px] uppercase font-bold text-zinc-600">Active Market Slug</label>
+                        <textarea 
+                            value={newSlug}
+                            onChange={(e) => setNewSlug(e.target.value)}
+                            className="bg-black/50 border border-zinc-700 rounded px-2 py-2 text-xs font-mono text-zinc-300 w-full h-16 resize-none focus:outline-none focus:border-emerald-500 leading-tight"
+                            placeholder="e.g., bitcoin-dec-31-100k"
+                        />
+                    </div>
+                    
+                    {/* Apply Button */}
+                    <button 
+                        onClick={handleUpdateConfig}
+                        className="w-full bg-zinc-800 hover:bg-emerald-700 text-white p-2 rounded transition-colors flex items-center justify-center gap-2 text-xs font-bold tracking-wider"
+                    >
+                        <Save size={14} />
+                        UPDATE CONFIGURATION
+                    </button>
+
+                    <div className="border-t border-zinc-800 pt-3 flex justify-between items-center">
+                        <label className="text-[10px] uppercase font-bold text-zinc-600">Connection Status</label>
                         <div className={`text-sm font-mono font-bold ${isConnected ? (errorMsg ? 'text-red-500' : 'text-emerald-400') : 'text-red-400'}`}>
                             {isConnected ? (errorMsg ? 'ERROR' : 'RUNNING') : 'OFFLINE'}
                         </div>

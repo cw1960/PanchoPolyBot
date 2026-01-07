@@ -1,8 +1,8 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import WebSocket from 'ws';
-import { WebSocketServer } from 'ws';
+// @ts-ignore
+import WebSocket, { WebSocketServer } from 'ws';
 import { ethers } from 'ethers';
 import { ClobClient, Side } from '@polymarket/clob-client';
 import chalk from 'chalk';
@@ -10,7 +10,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v6.5 (FORCED MARKET OVERRIDE)";
+const VERSION = "v6.6 (LIVE CONFIG ENABLED)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -51,16 +51,35 @@ wss.on('connection', (ws) => {
     ws.on('message', async (message) => {
         try {
             const data = JSON.parse(message);
+            
+            // --- UPDATE CONFIG HANDLER ---
             if (data.type === 'UPDATE_CONFIG') {
-                const newSlug = data.payload.slug;
-                if (!newSlug) return;
-
-                console.log(chalk.magenta(`\n> UI REQUEST: Switching to market: ${newSlug}`));
-                broadcast('LOG', { message: `Switching to ${newSlug}...` });
+                const { slug, betSize, maxEntryPrice, minPriceDelta } = data.payload;
                 
-                activeMarkets = [];
-                CONFIG.marketSlugs = [newSlug];
-                await resolveMarkets(CONFIG.marketSlugs);
+                // 1. Update Strategy Parameters
+                if (betSize !== undefined) CONFIG.betSizeUSDC = parseFloat(betSize);
+                if (maxEntryPrice !== undefined) CONFIG.maxEntryPrice = parseFloat(maxEntryPrice);
+                if (minPriceDelta !== undefined) CONFIG.minPriceDelta = parseFloat(minPriceDelta);
+
+                const newSlug = slug ? slug.trim() : null;
+                
+                console.log(chalk.magenta(`\n> UI CONFIG UPDATE:`));
+                console.log(chalk.dim(`  Bet Size: $${CONFIG.betSizeUSDC}`));
+                console.log(chalk.dim(`  Max Entry: $${CONFIG.maxEntryPrice}`));
+                console.log(chalk.dim(`  Min Delta: $${CONFIG.minPriceDelta}`));
+
+                // 2. Handle Market Switch if Slug Changed
+                if (newSlug) {
+                     console.log(chalk.magenta(`  Switching Market: ${newSlug}`));
+                     broadcast('LOG', { message: `Reconfiguring for ${newSlug}...` });
+                     
+                     // Reset state
+                     activeMarkets = [];
+                     CONFIG.marketSlugs = [newSlug];
+                     await resolveMarkets(CONFIG.marketSlugs);
+                } else {
+                     broadcast('LOG', { message: `Strategy Updated (No Market Change)` });
+                }
             }
         } catch (e) {
             console.error('Error handling UI command:', e);
@@ -85,7 +104,8 @@ const wallet = /** @type {any} */ (new ethers.Wallet(pKey, provider));
 const clobClient = new ClobClient(
     'https://clob.polymarket.com/', 
     137, 
-    /** @type {any} */ (wallet), 
+    // @ts-ignore
+    wallet, 
     {
         apiKey: process.env.POLY_API_KEY,
         apiSecret: process.env.POLY_API_SECRET,
