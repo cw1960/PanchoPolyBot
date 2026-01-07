@@ -1,5 +1,5 @@
 {
-  "name": "System Halted",
-  "description": "Project terminated by user request.",
+  "name": "Polymarket Quant Terminal",
+  "description": "Control plane for automated prediction market arbitrage.",
   "requestFramePermissions": []
 }
