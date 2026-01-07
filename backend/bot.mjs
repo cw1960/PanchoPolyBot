@@ -9,8 +9,20 @@ import chalk from 'chalk';
 import axios from 'axios';
 import process from 'process';
 
+// --- SAFETY NET: PREVENT CRASHES ---
+process.on('uncaughtException', (err) => {
+    console.error(chalk.bgRed.white.bold(`\n!!! UNCAUGHT EXCEPTION !!!`));
+    console.error(chalk.red(err.stack || err.message));
+    console.error(chalk.yellow(`Bot is staying alive...`));
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error(chalk.bgRed.white.bold(`\n!!! UNHANDLED REJECTION !!!`));
+    console.error(chalk.red(reason));
+});
+
 // --- VERSION CHECK ---
-const VERSION = "v7.5 (FINAL STABILITY)";
+const VERSION = "v8.0 (ANTI-CRASH + RECONNECT)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -47,6 +59,7 @@ const wss = new WebSocketServer({ port: WSS_PORT });
 console.log(chalk.magenta(`> UI SERVER: Listening on ws://localhost:${WSS_PORT}`));
 
 wss.on('connection', (ws) => {
+    // Send immediate sync
     if (activeMarkets.length > 0) {
          const m = activeMarkets[0];
          ws.send(JSON.stringify({
@@ -59,7 +72,11 @@ wss.on('connection', (ws) => {
                 downId: m.downId
             }
         }));
+    } else {
+        ws.send(JSON.stringify({ type: 'LOG', timestamp: Date.now(), payload: { message: "Connected to Backend v8.0" } }));
     }
+
+    ws.on('error', (err) => console.error(chalk.red(`> WS Client Error: ${err.message}`)));
 
     ws.on('message', async (message) => {
         try {
@@ -90,13 +107,16 @@ wss.on('connection', (ws) => {
                 if (rawInput) {
                      console.log(chalk.magenta(`  Resolving: ${rawInput}`));
                      broadcast('LOG', { message: `Resolving ${rawInput}...` });
+                     
+                     // Clear previous state safely
                      activeMarkets = [];
                      
                      try {
                         await resolveMarkets([rawInput]);
                      } catch (err) {
                         console.error("Resolution Crash:", err);
-                        broadcast('ERROR', { message: "Internal Resolution Error" });
+                        broadcast('ERROR', { message: `Resolution Failed: ${err.message}` });
+                        broadcast('SEARCH_COMPLETE', { found: 0 }); // Ensure UI stops spinner
                      }
                 }
             }
@@ -110,7 +130,11 @@ function broadcast(type, payload) {
     const message = JSON.stringify({ type, timestamp: Date.now(), payload });
     wss.clients.forEach(client => {
         if (client.readyState === 1) {
-            client.send(message);
+            try {
+                client.send(message);
+            } catch (e) {
+                console.error(`> Broadcast failed to client: ${e.message}`);
+            }
         }
     });
 }
@@ -174,7 +198,7 @@ async function resolveMarkets(inputs) {
         }
 
         console.log(chalk.yellow(`> Resolving: ${cleanInput} (ID: ${specificId || 'N/A'})`));
-        broadcast('LOG', { message: `Checking API...` });
+        broadcast('LOG', { message: `Checking API for ${cleanInput}...` });
 
         try {
             let targetMarket = null;
@@ -184,7 +208,7 @@ async function resolveMarkets(inputs) {
                 try {
                     const marketRes = await axios.get(`https://gamma-api.polymarket.com/markets/${specificId}`);
                     if (marketRes.data) targetMarket = marketRes.data;
-                } catch (e) { /* Ignore */ }
+                } catch (e) { /* Ignore 404 */ }
 
                 // B) Try as Event ID (Fallback)
                 if (!targetMarket) {
@@ -222,6 +246,7 @@ async function resolveMarkets(inputs) {
 
             if (!targetMarket) {
                  console.error(chalk.red(`> Market NOT FOUND. Input: ${rawInput}`)); 
+                 broadcast('ERROR', { message: `Market Not Found. Check ID/Slug.` });
                  continue; 
             }
             
@@ -253,7 +278,7 @@ async function resolveMarkets(inputs) {
             });
 
             if (!upTokenId || !downTokenId) {
-                broadcast('ERROR', { message: `Tokens Not Compatible` });
+                broadcast('ERROR', { message: `Tokens Not Compatible (No Yes/No)` });
                 continue;
             }
             
@@ -280,7 +305,7 @@ async function resolveMarkets(inputs) {
             marketsFound++;
 
         } catch (e) { 
-            console.error(chalk.red(`> Unhandled Error: ${e.message}`));
+            console.error(chalk.red(`> Unhandled Error in loop: ${e.message}`));
             broadcast('ERROR', { message: `System Error: ${e.message}` });
         }
     }

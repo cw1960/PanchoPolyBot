@@ -3,7 +3,7 @@ import { BotConfig, PricePoint, TradeLog } from '../types';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts';
-import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff, Copy, FolderSearch, RefreshCw, AlertTriangle, XCircle, ArrowRight, Save, Link, Edit2 } from 'lucide-react';
+import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff, Copy, FolderSearch, RefreshCw, AlertTriangle, XCircle, ArrowRight, Save, Link, Edit2, RotateCcw } from 'lucide-react';
 
 export const Dashboard: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
@@ -17,10 +17,11 @@ export const Dashboard: React.FC = () => {
   const [minDelta, setMinDelta] = useState('5.0');
   const [refPrice, setRefPrice] = useState(''); 
   const [isUpdating, setIsUpdating] = useState(false); 
+  const [shake, setShake] = useState(false); // Visual error feedback
   
   const [data, setData] = useState<PricePoint[]>([]);
   const [trades, setTrades] = useState<TradeLog[]>([]);
-  const [systemLogs, setSystemLogs] = useState<string[]>([]); // New dedicated system log
+  const [systemLogs, setSystemLogs] = useState<string[]>([]); 
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const ws = useRef<WebSocket | null>(null);
@@ -29,117 +30,113 @@ export const Dashboard: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [trades, systemLogs]);
 
-  // --- REAL WEBSOCKET CONNECTION ---
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
-    
-    const connect = () => {
-        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
-            return;
+  const connect = () => {
+    if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+
+    const socket = new WebSocket('ws://localhost:8080');
+    ws.current = socket;
+
+    socket.onopen = () => {
+        setIsConnected(true);
+        setErrorMsg(null);
+        setSystemLogs(prev => [...prev, `> [SYSTEM] Connected to Local Bot v8.0`]);
+        if (isUpdating) {
+            // If we were trying to update, resend now
+            handleUpdateConfig();
         }
-
-        const socket = new WebSocket('ws://localhost:8080');
-        ws.current = socket;
-
-        socket.onopen = () => {
-            setIsConnected(true);
-            setErrorMsg(null);
-            setSystemLogs(prev => [...prev, `> [SYSTEM] Connected to Local Bot`]);
-        };
-
-        socket.onclose = () => {
-            setIsConnected(false);
-            setIsUpdating(false);
-        };
-
-        socket.onerror = (err) => {
-            socket.close();
-        };
-
-        socket.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            
-            // LOG Handling
-            if (msg.type === 'LOG') {
-                setSystemLogs(prev => [...prev, `> [BOT] ${msg.payload.message}`]);
-            }
-
-            // SEARCH_COMPLETE Handling (Bot finished searching, maybe found nothing)
-            if (msg.type === 'SEARCH_COMPLETE') {
-                setIsUpdating(false);
-                if (msg.payload.found === 0) {
-                    setErrorMsg("No markets found. Check ID.");
-                    setSystemLogs(prev => [...prev, `> [ERROR] Search finished. No markets found.`]);
-                }
-            }
-
-            // Stop Spinner on definitive events
-            if (['ERROR', 'MARKET_LOCKED'].includes(msg.type)) {
-               setIsUpdating(false);
-            }
-
-            // 0. Handle Errors
-            if (msg.type === 'ERROR') {
-                setErrorMsg(msg.payload.message);
-                setActiveMarket('STOPPED');
-                setSystemLogs(prev => [...prev, `> [ERROR] ${msg.payload.message}`]);
-            }
-
-            // 1. Market Lock (Config Update)
-            if (msg.type === 'MARKET_LOCKED') {
-                setActiveMarket(`${msg.payload.slug}`);
-                setErrorMsg(null);
-                setNewSlug(msg.payload.slug); 
-                
-                if (msg.payload.referencePrice) {
-                    setRefPrice(msg.payload.referencePrice.toString());
-                }
-                
-                setSystemLogs(prev => [...prev, `> [SUCCESS] Market Locked: ${msg.payload.slug}`]);
-            }
-            
-            // 2. Real-time Price Update
-            if (msg.type === 'PRICE_UPDATE') {
-                const point: PricePoint = {
-                    timestamp: msg.timestamp,
-                    sourcePrice: msg.payload.sourcePrice,
-                    targetPrice: msg.payload.referencePrice,
-                    delta: msg.payload.delta
-                };
-
-                setData(prev => {
-                    const newData = [...prev, point];
-                    if (newData.length > 100) return newData.slice(newData.length - 100);
-                    return newData;
-                });
-            }
-
-            // 3. Trade Execution
-            if (msg.type === 'TRADE_EXECUTED') {
-                const newTrade: TradeLog = {
-                    id: msg.payload.id || 'N/A',
-                    timestamp: msg.timestamp,
-                    type: msg.payload.type === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
-                    asset: msg.payload.asset,
-                    entryPrice: msg.payload.price,
-                    marketPrice: 0, 
-                    amount: msg.payload.amount,
-                    status: 'OPEN',
-                    profit: 0
-                };
-                setTrades(prev => [...prev, newTrade]);
-                setSystemLogs(prev => [...prev, `> [TRADE] Executed ${newTrade.type} @ $${newTrade.entryPrice}`]);
-            }
-        };
     };
 
+    socket.onclose = () => {
+        setIsConnected(false);
+        setIsUpdating(false);
+    };
+
+    socket.onerror = (err) => {
+        socket.close();
+    };
+
+    socket.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        
+        // LOG Handling
+        if (msg.type === 'LOG') {
+            setSystemLogs(prev => [...prev, `> [BOT] ${msg.payload.message}`]);
+        }
+
+        // SEARCH_COMPLETE Handling
+        if (msg.type === 'SEARCH_COMPLETE') {
+            setIsUpdating(false);
+            if (msg.payload.found === 0) {
+                setErrorMsg("No markets found with that ID.");
+                setSystemLogs(prev => [...prev, `> [ERROR] Search finished. No markets found.`]);
+            }
+        }
+
+        if (['ERROR', 'MARKET_LOCKED'].includes(msg.type)) {
+           setIsUpdating(false);
+        }
+
+        if (msg.type === 'ERROR') {
+            setErrorMsg(msg.payload.message);
+            setActiveMarket('STOPPED');
+            setSystemLogs(prev => [...prev, `> [ERROR] ${msg.payload.message}`]);
+        }
+
+        if (msg.type === 'MARKET_LOCKED') {
+            setActiveMarket(`${msg.payload.slug}`);
+            setErrorMsg(null);
+            setNewSlug(msg.payload.slug); 
+            
+            if (msg.payload.referencePrice) {
+                setRefPrice(msg.payload.referencePrice.toString());
+            }
+            
+            setSystemLogs(prev => [...prev, `> [SUCCESS] Market Locked: ${msg.payload.slug}`]);
+        }
+        
+        if (msg.type === 'PRICE_UPDATE') {
+            const point: PricePoint = {
+                timestamp: msg.timestamp,
+                sourcePrice: msg.payload.sourcePrice,
+                targetPrice: msg.payload.referencePrice,
+                delta: msg.payload.delta
+            };
+
+            setData(prev => {
+                const newData = [...prev, point];
+                if (newData.length > 100) return newData.slice(newData.length - 100);
+                return newData;
+            });
+        }
+
+        if (msg.type === 'TRADE_EXECUTED') {
+            const newTrade: TradeLog = {
+                id: msg.payload.id || 'N/A',
+                timestamp: msg.timestamp,
+                type: msg.payload.type === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
+                asset: msg.payload.asset,
+                entryPrice: msg.payload.price,
+                marketPrice: 0, 
+                amount: msg.payload.amount,
+                status: 'OPEN',
+                profit: 0
+            };
+            setTrades(prev => [...prev, newTrade]);
+            setSystemLogs(prev => [...prev, `> [TRADE] Executed ${newTrade.type} @ $${newTrade.entryPrice}`]);
+        }
+    };
+  };
+
+  // --- REAL WEBSOCKET CONNECTION ---
+  useEffect(() => {
     connect();
-    
-    interval = setInterval(() => {
+    const interval = setInterval(() => {
         if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
             connect();
         }
-    }, 1000);
+    }, 2000); // Check every 2s
 
     return () => {
         clearInterval(interval);
@@ -147,31 +144,44 @@ export const Dashboard: React.FC = () => {
     };
   }, []);
 
+  const triggerShake = () => {
+      setShake(true);
+      setTimeout(() => setShake(false), 500);
+  }
+
   const handleUpdateConfig = () => {
-    // 1. Validation Feedback
-    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
-        setSystemLogs(prev => [...prev, `> [ERROR] Cannot update: Bot Disconnected.`]);
-        setErrorMsg("Bot Disconnected");
-        return;
-    }
-    
     const rawSlug = newSlug.trim();
     if (!rawSlug) {
-        setSystemLogs(prev => [...prev, `> [WARN] Update ignored: ID field empty.`]);
+        setSystemLogs(prev => [...prev, `> [WARN] Update ignored: Input empty.`]);
         return;
     }
 
-    // 2. Start Process
-    setSystemLogs(prev => [...prev, `> [CMD] Searching for: ${rawSlug}...`]);
+    // Always set updating to true for visual feedback
     setIsUpdating(true);
     setActiveMarket('Updating...');
-    setErrorMsg(null);
     
-    if (rawSlug !== activeMarket) {
-        setData([]); 
+    // Check connection
+    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+        setSystemLogs(prev => [...prev, `> [WARN] Bot Disconnected. Attempting reconnect...`]);
+        connect(); 
+        
+        // If still closed after immediate connect attempt (async), fail after delay
+        setTimeout(() => {
+            if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+                setSystemLogs(prev => [...prev, `> [ERROR] Update Failed: Backend Dead.`]);
+                setErrorMsg("Connection Lost. Check Terminal.");
+                setIsUpdating(false);
+                triggerShake();
+            }
+        }, 1000);
+        return;
     }
+
+    setErrorMsg(null);
+    if (rawSlug !== activeMarket) setData([]); 
     
-    // 3. Send
+    setSystemLogs(prev => [...prev, `> [CMD] Sending Update: ${rawSlug}`]);
+    
     try {
         ws.current.send(JSON.stringify({
             type: 'UPDATE_CONFIG',
@@ -184,8 +194,9 @@ export const Dashboard: React.FC = () => {
             }
         }));
     } catch (e) {
-        setSystemLogs(prev => [...prev, `> [ERROR] WebSocket Send Failed.`]);
+        setSystemLogs(prev => [...prev, `> [ERROR] Send Failed.`]);
         setIsUpdating(false);
+        triggerShake();
     }
   };
 
@@ -196,26 +207,31 @@ export const Dashboard: React.FC = () => {
       
       {/* Real Mode Banner / Error Banner */}
       {!isConnected && (
-        <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-lg flex flex-col md:flex-row items-center justify-between gap-4 font-mono shadow-xl animate-in fade-in slide-in-from-top-4 duration-500">
+        <div className="bg-red-950/30 border border-red-900/50 p-3 rounded-lg flex flex-col md:flex-row items-center justify-between gap-4 font-mono shadow-xl animate-in fade-in slide-in-from-top-4 duration-500">
             <div className="flex items-center gap-4">
-                <div className="p-3 bg-red-900/20 rounded-full animate-pulse">
-                    <WifiOff size={24} className="text-red-500" />
+                <div className="p-2 bg-red-900/20 rounded-full animate-pulse">
+                    <WifiOff size={20} className="text-red-500" />
                 </div>
                 <div>
-                    <h2 className="text-white font-bold text-lg flex items-center gap-2">
-                        BOT DISCONNECTED
+                    <h2 className="text-red-400 font-bold text-sm flex items-center gap-2">
+                        BACKEND DISCONNECTED
                     </h2>
-                    <p className="text-zinc-500 text-xs mt-1">
-                        1. Press <span className="text-emerald-400 font-bold bg-zinc-800 px-1 rounded">Ctrl + C</span> to kill old processes.<br/>
-                        2. Start: <span className="text-emerald-400 font-bold bg-zinc-800 px-1 rounded">node bot.mjs</span>
+                    <p className="text-zinc-500 text-[10px] mt-0.5">
+                        The UI cannot talk to the trading bot. Is `node bot.mjs` running?
                     </p>
                 </div>
             </div>
+            <button 
+                onClick={connect}
+                className="bg-red-900/20 hover:bg-red-900/40 text-red-400 text-xs px-3 py-1.5 rounded border border-red-900/50 flex items-center gap-2 transition-colors"
+            >
+                <RefreshCw size={12} /> RETRY CONNECTION
+            </button>
         </div>
       )}
 
       {/* Top Bar */}
-      <header className={`flex justify-between items-center bg-zinc-900/50 border border-zinc-800 p-4 rounded-lg backdrop-blur-sm transition-opacity duration-500 ${!isConnected ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
+      <header className={`flex justify-between items-center bg-zinc-900/50 border border-zinc-800 p-4 rounded-lg backdrop-blur-sm transition-opacity duration-500 ${!isConnected ? 'opacity-80' : 'opacity-100'}`}>
         <div className="flex items-center gap-3">
            <div className={`w-3 h-3 rounded-full ${isConnected ? (errorMsg ? 'bg-red-500 animate-ping' : 'bg-emerald-500 shadow-[0_0_10px_#10b981]') : 'bg-red-500'}`} />
            <div className="flex flex-col">
@@ -234,7 +250,7 @@ export const Dashboard: React.FC = () => {
         </div>
       </header>
 
-      <div className={`flex-1 grid grid-cols-12 gap-4 min-h-0 transition-opacity duration-500 ${!isConnected ? 'opacity-25 pointer-events-none grayscale' : 'opacity-100'}`}>
+      <div className={`flex-1 grid grid-cols-12 gap-4 min-h-0 transition-opacity duration-500 ${!isConnected ? 'opacity-50 grayscale' : 'opacity-100'}`}>
         
         {/* Left Column: Chart */}
         <div className="col-span-8 flex flex-col gap-4">
@@ -272,15 +288,15 @@ export const Dashboard: React.FC = () => {
                {!isConnected && (
                    <div className="absolute inset-0 flex items-center justify-center z-20 bg-black/50 backdrop-blur-sm">
                        <div className="text-center">
-                           <Loader2 className="w-10 h-10 text-emerald-500 animate-spin mx-auto mb-4" />
-                           <p className="text-zinc-400 font-mono">Waiting for Data Stream...</p>
+                           <WifiOff className="w-10 h-10 text-zinc-600 mx-auto mb-4" />
+                           <p className="text-zinc-500 font-mono">Stream Disconnected</p>
                        </div>
                    </div>
                )}
                
                {/* OVERLAY: ERROR or IDLE */}
                {isConnected && (activeMarket === 'STOPPED' || activeMarket === 'Scanning Markets...') && (
-                   <div className="absolute inset-0 flex items-center justify-center z-20 bg-black/80 backdrop-blur-md">
+                   <div className={`absolute inset-0 flex items-center justify-center z-20 bg-black/80 backdrop-blur-md transition-transform duration-100 ${shake ? 'translate-x-2' : ''} ${shake ? '-translate-x-2' : ''}`}>
                        <div className={`text-center p-8 border ${errorMsg ? 'border-red-900 bg-red-950/20' : 'border-zinc-800 bg-zinc-950'} rounded-lg shadow-2xl transition-all duration-300`}>
                            {errorMsg ? (
                                <>
@@ -308,13 +324,13 @@ export const Dashboard: React.FC = () => {
                    </div>
                )}
 
-               {isConnected && activeMarket === 'Updating...' && (
-                   <div className="absolute inset-0 flex items-center justify-center z-20 bg-black/80 backdrop-blur-md">
+               {isUpdating && (
+                   <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/90 backdrop-blur-md">
                        <div className="text-center p-8">
                            <Loader2 className="w-12 h-12 text-yellow-500 animate-spin mx-auto mb-4" />
-                           <h3 className="text-xl font-bold text-white mb-2">Searching Market...</h3>
+                           <h3 className="text-xl font-bold text-white mb-2">Resolving Market...</h3>
                            <p className="text-zinc-400 text-sm font-mono">
-                               Resolving: <span className="text-emerald-400">{newSlug}</span>
+                               Querying Polymarket API for: <span className="text-emerald-400">{newSlug}</span>
                            </p>
                        </div>
                    </div>
@@ -356,7 +372,7 @@ export const Dashboard: React.FC = () => {
                     )}
                     
                     {systemLogs.map((log, i) => (
-                        <div key={`sys-${i}`} className="text-zinc-500 border-b border-zinc-800/20 pb-1 mb-1">
+                        <div key={`sys-${i}`} className={`border-b border-zinc-800/20 pb-1 mb-1 ${log.includes('ERROR') ? 'text-red-400' : 'text-zinc-500'}`}>
                             {log}
                         </div>
                     ))}
@@ -456,10 +472,10 @@ export const Dashboard: React.FC = () => {
                     <button 
                         onClick={handleUpdateConfig}
                         disabled={isUpdating}
-                        className={`w-full text-white p-2 rounded transition-colors flex items-center justify-center gap-2 text-xs font-bold tracking-wider ${isUpdating ? 'bg-zinc-700 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-500'}`}
+                        className={`w-full text-white p-2 rounded transition-colors flex items-center justify-center gap-2 text-xs font-bold tracking-wider ${isUpdating ? 'bg-zinc-700 cursor-not-allowed' : (isConnected ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-900 hover:bg-red-800')}`}
                     >
-                        {isUpdating ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-                        {isUpdating ? 'SEARCHING...' : 'UPDATE CONFIGURATION'}
+                        {isUpdating ? <Loader2 size={14} className="animate-spin" /> : (!isConnected ? <RefreshCw size={14} /> : <Save size={14} />)}
+                        {isUpdating ? 'SEARCHING...' : (!isConnected ? 'RECONNECT & UPDATE' : 'UPDATE CONFIGURATION')}
                     </button>
 
                     <div className="border-t border-zinc-800 pt-3 flex justify-between items-center">
@@ -473,7 +489,7 @@ export const Dashboard: React.FC = () => {
              
              {/* Status Box */}
              <div className="flex-1 bg-black border border-zinc-800 rounded-lg p-6 relative overflow-hidden flex items-center justify-center">
-                 <div className="text-center space-y-4 opacity-50">
+                 <div className={`text-center space-y-4 opacity-50 transition-transform ${shake ? 'translate-x-1' : ''}`}>
                     {errorMsg ? (
                         <XCircle size={48} className="mx-auto text-red-700" />
                     ) : (
