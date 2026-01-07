@@ -154,8 +154,7 @@ export const Dashboard: React.FC = () => {
                     </h2>
                     <p className="text-zinc-500 text-xs mt-1">
                         1. Press <span className="text-emerald-400 font-bold bg-zinc-800 px-1 rounded">Ctrl + C</span> to kill old processes.<br/>
-                        2. Verify file exists: <span className="text-zinc-400">ls -l engine.mjs</span><br/>
-                        3. Start: <span className="text-emerald-400 font-bold bg-zinc-800 px-1 rounded">node engine.mjs</span>
+                        2. Start: <span className="text-emerald-400 font-bold bg-zinc-800 px-1 rounded">node bot.mjs</span>
                     </p>
                 </div>
             </div>
@@ -164,8 +163,8 @@ export const Dashboard: React.FC = () => {
                  <div className="hidden md:block h-8 w-px bg-zinc-800"></div>
                  <div className="flex-1 md:flex-none">
                        <div className="flex items-center gap-2 bg-black/50 p-2 rounded border border-zinc-700 hover:border-emerald-500 transition-colors cursor-pointer group"
-                            onClick={() => navigator.clipboard.writeText('cd ~/Desktop/pancho-bot/backend && ls -l && node engine.mjs')}>
-                           <code className="text-emerald-400 font-bold text-xs select-all">cd ~/Desktop/pancho-bot/backend && node engine.mjs</code>
+                            onClick={() => navigator.clipboard.writeText('cd ~/Desktop/pancho-bot/backend && node bot.mjs')}>
+                           <code className="text-emerald-400 font-bold text-xs select-all">cd ~/Desktop/pancho-bot/backend && node bot.mjs</code>
                            <Copy size={12} className="text-zinc-600 group-hover:text-emerald-500" />
                        </div>
                  </div>

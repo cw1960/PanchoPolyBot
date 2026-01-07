@@ -1,7 +1,9 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import WebSocket, { WebSocketServer } from 'ws';
+import WebSocket from 'ws';
+const WebSocketServer = WebSocket.Server;
+
 import { ethers } from 'ethers';
 import { ClobClient, Side } from '@polymarket/clob-client';
 import chalk from 'chalk';
@@ -75,7 +77,7 @@ wss.on('connection', (ws) => {
 function broadcast(type, payload) {
     const message = JSON.stringify({ type, timestamp: Date.now(), payload });
     wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
+        if (client.readyState === 1) {
             client.send(message);
         }
     });
@@ -88,7 +90,7 @@ const wallet = new ethers.Wallet(pKey, provider);
 const clobClient = new ClobClient(
     'https://clob.polymarket.com/', 
     137, 
-    wallet, 
+    /** @type {any} */ (wallet), 
     {
         apiKey: process.env.POLY_API_KEY,
         apiSecret: process.env.POLY_API_SECRET,
