@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { 
   Activity, Power, Server, Shield, Plus, Trash2, 
@@ -9,7 +10,16 @@ import { MarketConfig, BotState, BotStatus } from '../types';
 // --- MOCK SUPABASE LAYER ---
 // In a real app, these would be API calls to Supabase
 const mockInitialMarkets: MarketConfig[] = [
-  { id: '1', marketSlug: 'btc-jan-2026-100k', isActive: true, maxExposure: 100, minPriceDelta: 5.0, maxEntryPrice: 0.95 },
+  { 
+    id: '1', 
+    polymarket_market_id: 'btc-jan-2026-100k', 
+    asset: 'BTC',
+    direction: 'UP',
+    enabled: true, 
+    max_exposure: 100, 
+    min_price_delta: 5.0, 
+    max_entry_price: 0.95 
+  },
 ];
 
 export const Dashboard: React.FC = () => {
@@ -74,11 +84,13 @@ export const Dashboard: React.FC = () => {
     setTimeout(() => {
       const newMarket: MarketConfig = {
         id: Math.random().toString(36).substr(2, 9),
-        marketSlug: newMarketInput,
-        isActive: true,
-        maxExposure: 50, // Default safety
-        minPriceDelta: 5.0,
-        maxEntryPrice: 0.95
+        polymarket_market_id: newMarketInput,
+        asset: 'BTC', // Mock default
+        direction: 'UP', // Mock default
+        enabled: true,
+        max_exposure: 50, // Default safety
+        min_price_delta: 5.0,
+        max_entry_price: 0.95
       };
       setMarkets(prev => [...prev, newMarket]);
       setNewMarketInput('');
@@ -185,9 +197,9 @@ export const Dashboard: React.FC = () => {
                 <div key={market.id} className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 flex flex-col gap-4 group hover:border-zinc-700 transition-all">
                    <div className="flex justify-between items-start">
                       <div className="flex items-center gap-3">
-                         <div className={`w-2 h-2 rounded-full ${market.isActive ? 'bg-emerald-500' : 'bg-zinc-600'}`} />
+                         <div className={`w-2 h-2 rounded-full ${market.enabled ? 'bg-emerald-500' : 'bg-zinc-600'}`} />
                          <div>
-                            <h4 className="font-mono font-bold text-emerald-400 text-sm truncate max-w-[300px]">{market.marketSlug}</h4>
+                            <h4 className="font-mono font-bold text-emerald-400 text-sm truncate max-w-[300px]">{market.polymarket_market_id}</h4>
                             <p className="text-xs text-zinc-500">ID: {market.id}</p>
                          </div>
                       </div>
@@ -200,15 +212,15 @@ export const Dashboard: React.FC = () => {
                    <div className="grid grid-cols-3 gap-4 border-t border-zinc-800/50 pt-3">
                       <div>
                         <label className="text-[10px] uppercase text-zinc-600 font-bold block">Max Risk</label>
-                        <span className="font-mono text-sm text-zinc-300">${market.maxExposure}</span>
+                        <span className="font-mono text-sm text-zinc-300">${market.max_exposure}</span>
                       </div>
                       <div>
                         <label className="text-[10px] uppercase text-zinc-600 font-bold block">Trigger Delta</label>
-                        <span className="font-mono text-sm text-zinc-300">{market.minPriceDelta}%</span>
+                        <span className="font-mono text-sm text-zinc-300">{market.min_price_delta}%</span>
                       </div>
                       <div>
                         <label className="text-[10px] uppercase text-zinc-600 font-bold block">Max Entry</label>
-                        <span className="font-mono text-sm text-zinc-300">${market.maxEntryPrice}</span>
+                        <span className="font-mono text-sm text-zinc-300">${market.max_entry_price}</span>
                       </div>
                    </div>
                 </div>

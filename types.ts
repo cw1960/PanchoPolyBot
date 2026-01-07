@@ -1,20 +1,40 @@
+
 export type BotStatus = 'STOPPED' | 'STARTING' | 'RUNNING' | 'ERROR';
 
+// Maps directly to the 'markets' table in Supabase
 export interface MarketConfig {
-  id: string; // The internal UUID for our config
-  marketSlug: string; // The user-facing Polymarket slug or ID
-  isActive: boolean;
-  maxExposure: number; // Max $ amount to risk on this specific market
-  minPriceDelta: number; // Deviation required to trigger
-  maxEntryPrice: number; // Safety ceiling (e.g. 0.95)
+  id: string; // UUID from Supabase
+  polymarket_market_id: string; // The slug or ID
+  asset: string; // 'BTC', 'ETH' (derived from slug usually)
+  direction: 'UP' | 'DOWN'; // (derived or configured)
+  enabled: boolean;
+  max_exposure: number;
+  min_price_delta: number;
+  max_entry_price: number;
+  created_at?: string;
+}
+
+// Maps directly to the 'bot_control' table
+export interface GlobalBotState {
+  desired_state: 'running' | 'stopped';
+  updated_at: string;
+}
+
+// Maps to 'market_state' table
+export interface MarketStatusRow {
+  market_id: string;
+  status: string;
+  exposure: number;
+  confidence: number;
+  last_update: string;
 }
 
 export interface BotState {
   status: BotStatus;
-  lastHeartbeat: number; // Unix timestamp of last ping from VPS
+  lastHeartbeat: number;
   activeMarkets: number;
-  totalExposure: number; // Sum of all open positions
-  globalKillSwitch: boolean; // If true, bot stops ALL trades immediately
+  totalExposure: number;
+  globalKillSwitch: boolean;
   logs: string[];
 }
 
@@ -24,15 +44,7 @@ export interface ControlCommand {
   timestamp: number;
 }
 
-// Placeholder for Supabase Row structures
-export interface SupabaseMarketRow {
-  id: string;
-  created_at: string;
-  slug: string;
-  is_active: boolean;
-  config_json: any;
-}
-
+// Simulation Types
 export interface PricePoint {
   timestamp: number;
   sourcePrice: number;
@@ -43,12 +55,12 @@ export interface PricePoint {
 export interface TradeLog {
   id: string;
   timestamp: number;
-  type: string;
+  type: 'BUY_YES' | 'BUY_NO';
   asset: string;
   entryPrice: number;
   marketPrice: number;
   amount: number;
-  status: string;
+  status: 'OPEN' | 'CLOSED' | 'WON' | 'LOST';
 }
 
 export interface BotConfig {
