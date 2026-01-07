@@ -145,16 +145,17 @@ export const Dashboard: React.FC = () => {
       {!isConnected && (
         <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-lg flex flex-col md:flex-row items-center justify-between gap-4 font-mono shadow-xl animate-in fade-in slide-in-from-top-4 duration-500">
             <div className="flex items-center gap-4">
-                <div className="p-3 bg-zinc-800 rounded-full animate-pulse">
-                    <Loader2 size={24} className="text-zinc-400 animate-spin" />
+                <div className="p-3 bg-red-900/20 rounded-full animate-pulse">
+                    <WifiOff size={24} className="text-red-500" />
                 </div>
                 <div>
                     <h2 className="text-white font-bold text-lg flex items-center gap-2">
-                        WAITING FOR BOT CONNECTION...
-                        <span className="text-xs font-normal text-zinc-500 bg-zinc-800 px-2 py-0.5 rounded">Port 8080</span>
+                        BOT DISCONNECTED
                     </h2>
-                    <p className="text-zinc-500 text-xs">
-                        Keep your terminal open. Run: <span className="text-emerald-500">node engine.mjs</span>
+                    <p className="text-zinc-500 text-xs mt-1">
+                        1. Press <span className="text-emerald-400 font-bold bg-zinc-800 px-1 rounded">Ctrl + C</span> to kill old processes.<br/>
+                        2. Verify file exists: <span className="text-zinc-400">ls -l engine.mjs</span><br/>
+                        3. Start: <span className="text-emerald-400 font-bold bg-zinc-800 px-1 rounded">node engine.mjs</span>
                     </p>
                 </div>
             </div>
@@ -163,7 +164,7 @@ export const Dashboard: React.FC = () => {
                  <div className="hidden md:block h-8 w-px bg-zinc-800"></div>
                  <div className="flex-1 md:flex-none">
                        <div className="flex items-center gap-2 bg-black/50 p-2 rounded border border-zinc-700 hover:border-emerald-500 transition-colors cursor-pointer group"
-                            onClick={() => navigator.clipboard.writeText('cd ~/Desktop/pancho-bot/backend && node engine.mjs')}>
+                            onClick={() => navigator.clipboard.writeText('cd ~/Desktop/pancho-bot/backend && ls -l && node engine.mjs')}>
                            <code className="text-emerald-400 font-bold text-xs select-all">cd ~/Desktop/pancho-bot/backend && node engine.mjs</code>
                            <Copy size={12} className="text-zinc-600 group-hover:text-emerald-500" />
                        </div>
