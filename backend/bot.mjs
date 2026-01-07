@@ -10,7 +10,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v6.13 (DIRECT TID LOOKUP)";
+const VERSION = "v6.14 (PURE ID MODE)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -76,7 +76,7 @@ wss.on('connection', (ws) => {
                 if (maxEntryPrice !== undefined) CONFIG.maxEntryPrice = parseFloat(maxEntryPrice);
                 if (minPriceDelta !== undefined) CONFIG.minPriceDelta = parseFloat(minPriceDelta);
 
-                // Receive RAW slug (potentially with ?tid=...)
+                // Receive RAW slug/id
                 const rawSlug = slug;
                 const newRefPrice = referencePrice ? parseFloat(referencePrice) : null;
                 
@@ -87,14 +87,12 @@ wss.on('connection', (ws) => {
 
                 // 2. Handle Ref Price Override
                 if (newRefPrice && activeMarkets.length > 0) {
-                    // If we are just updating the SAME market, apply ref price immediately
-                    // But if slugs differ, we need to re-resolve first
                     activeMarkets[0].referencePrice = newRefPrice;
                 }
 
-                // 3. Resolve New Market (Always resolve if slug is sent, to be safe)
+                // 3. Resolve New Market (Always resolve if slug/id is sent)
                 if (rawSlug) {
-                     console.log(chalk.magenta(`  Processing Market: ${rawSlug}`));
+                     console.log(chalk.magenta(`  Processing Input: ${rawSlug}`));
                      broadcast('LOG', { message: `Reconfiguring for ${rawSlug}...` });
                      
                      // Reset state
@@ -165,48 +163,53 @@ async function resolveMarkets(rawSlugs) {
         let cleanSlug = rawSlug;
         let specificTid = null;
 
-        if (rawSlug.includes('tid=')) {
-            // Extract TID if present
+        // --- CHECK 1: PURE ID INPUT (Recommended) ---
+        // If input contains only digits, assume it's a Market ID directly
+        if (/^\d+$/.test(rawSlug.trim())) {
+             specificTid = rawSlug.trim();
+             cleanSlug = "RAW_ID_MODE"; 
+             console.log(chalk.cyan(`> DETECTED RAW ID INPUT: ${specificTid}`));
+        } 
+        // --- CHECK 2: URL with tid param ---
+        else if (rawSlug.includes('tid=')) {
             const parts = rawSlug.split('?');
             cleanSlug = parts[0].trim();
             const urlParams = new URLSearchParams(parts[1]);
             specificTid = urlParams.get('tid');
-        } else {
+        } 
+        // --- CHECK 3: Standard Slug ---
+        else {
             cleanSlug = rawSlug.split('?')[0].trim();
         }
 
         console.log(chalk.yellow(`> Resolving: ${cleanSlug} (TID: ${specificTid || 'None'})`));
-        broadcast('LOG', { message: `Resolving ${cleanSlug}...` });
+        broadcast('LOG', { message: `Resolving Market...` });
 
         try {
             let targetMarket = null;
 
-            // --- STRATEGY 1: DIRECT TID LOOKUP ---
-            // If we have a TID, we skip the slug search and go straight to the market endpoint.
-            // This fixes issues where the URL slug doesn't match the API slug.
+            // --- STRATEGY 1: DIRECT TID LOOKUP (Primary) ---
             if (specificTid) {
                 try {
-                    console.log(chalk.blue(`> Attempting Direct Lookup via TID: ${specificTid}`));
+                    console.log(chalk.blue(`> Querying Gamma API for ID: ${specificTid}`));
                     const directRes = await axios.get(`https://gamma-api.polymarket.com/markets/${specificTid}`);
                     if (directRes.data) {
                         targetMarket = directRes.data;
-                        console.log(chalk.green(`> FOUND VIA TID!`));
+                        console.log(chalk.green(`> MARKET FOUND VIA ID!`));
                     }
                 } catch (tidErr) {
-                    console.log(chalk.yellow(`> Direct TID lookup failed (${tidErr.message}). Falling back to slug search...`));
+                    console.log(chalk.yellow(`> Direct TID lookup failed (${tidErr.message})...`));
                 }
             }
 
-            // --- STRATEGY 2: SLUG SEARCH ---
-            if (!targetMarket) {
+            // --- STRATEGY 2: SLUG SEARCH (Fallback, only if not in Raw ID mode) ---
+            if (!targetMarket && cleanSlug !== "RAW_ID_MODE") {
                 const response = await axios.get(`https://gamma-api.polymarket.com/events?slug=${cleanSlug}`);
                 if (response.data.length > 0) { 
                     const eventData = response.data[0];
                     const markets = eventData.markets;
 
                     if (specificTid) {
-                        // User provided a specific ID, filter for it
-                        // Use loose equality (==) because API IDs can be strings or numbers
                         targetMarket = markets.find(m => m.id == specificTid || (m.clobTokenIds && JSON.stringify(m.clobTokenIds).includes(specificTid)));
                     } else {
                         targetMarket = markets[0];
@@ -215,8 +218,8 @@ async function resolveMarkets(rawSlugs) {
             }
 
             if (!targetMarket) {
-                 console.error(chalk.red(`> Market not found via TID or Slug.`)); 
-                 broadcast('ERROR', { message: `Market Not Found` });
+                 console.error(chalk.red(`> Market not found. Please verify ID.`)); 
+                 broadcast('ERROR', { message: `Market ID Not Found` });
                  continue; 
             }
             

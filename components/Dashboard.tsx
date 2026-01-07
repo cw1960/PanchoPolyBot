@@ -148,7 +148,7 @@ export const Dashboard: React.FC = () => {
     setActiveMarket('Updating...');
     setErrorMsg(null);
     
-    // SEND THE FULL SLUG (DO NOT STRIP TID)
+    // SEND THE FULL STRING (ID OR SLUG)
     const rawSlug = newSlug.trim();
     
     // If market slug changed, clear chart for visual clarity
@@ -211,7 +211,7 @@ export const Dashboard: React.FC = () => {
                 <AlertTriangle className="text-red-500 animate-pulse" size={20} />
                 <div>
                     <h3 className="text-red-400 font-bold text-sm">MARKET ERROR</h3>
-                    <p className="text-red-200/70 text-xs">{errorMsg}. Please try a valid market slug.</p>
+                    <p className="text-red-200/70 text-xs">{errorMsg}. Please try a valid Market ID.</p>
                 </div>
             </div>
          </div>
@@ -290,10 +290,10 @@ export const Dashboard: React.FC = () => {
                            <h3 className="text-xl font-bold text-white mb-2">System Idle</h3>
                            <p className="text-zinc-400 text-sm mb-6 max-w-md mx-auto">
                                The bot is connected but has no active market configured. 
-                               Please find a valid <span className="text-emerald-400 font-mono">Market Slug</span> from Polymarket and enter it in the configuration panel on the right.
+                               Please enter a <span className="text-emerald-400 font-mono">Market ID</span> (TID) from the URL.
                            </p>
                            <div className="text-xs text-zinc-600 font-mono bg-zinc-900 p-2 rounded">
-                               e.g. bitcoin-price-jan-8-2025?tid=123...
+                               e.g. 1767803541594
                            </div>
                        </div>
                    </div>
@@ -426,12 +426,12 @@ export const Dashboard: React.FC = () => {
 
                     {/* Slug Input */}
                     <div className="space-y-2">
-                        <label className="text-[10px] uppercase font-bold text-zinc-600">Active Market Slug</label>
+                        <label className="text-[10px] uppercase font-bold text-zinc-600">Active Market Slug OR Market ID</label>
                         <textarea 
                             value={newSlug}
                             onChange={(e) => setNewSlug(e.target.value)}
                             className="bg-black/50 border border-zinc-700 rounded px-2 py-2 text-xs font-mono text-zinc-300 w-full h-16 resize-none focus:outline-none focus:border-emerald-500 leading-tight"
-                            placeholder="e.g., bitcoin-dec-31-100k"
+                            placeholder="e.g. 1767803541594 (Recommended) OR bitcoin-slug..."
                         />
                     </div>
                     
@@ -462,7 +462,7 @@ export const Dashboard: React.FC = () => {
                     )}
                     
                     <p className="text-zinc-500 text-sm max-w-[200px] mx-auto">
-                        {errorMsg ? "Check market slug above." : "Monitoring price spread for arbitrage opportunities."}
+                        {errorMsg ? "Check market ID above." : "Monitoring price spread for arbitrage opportunities."}
                     </p>
                  </div>
              </div>
