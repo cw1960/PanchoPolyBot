@@ -1,14 +1,19 @@
-require('dotenv').config();
-const WebSocket = require('ws');
-const { ethers } = require('ethers');
-const { ClobClient, Side } = require('@polymarket/clob-client');
-const chalk = require('chalk');
-const axios = require('axios');
+import dotenv from 'dotenv';
+dotenv.config();
 
-// DEBUG: Print location
-console.log(chalk.cyan(`> DEBUG: Running on ${process.platform} in directory: ${process.cwd()}`));
+import WebSocket, { WebSocketServer } from 'ws';
+import { ethers } from 'ethers';
+import { ClobClient, Side } from '@polymarket/clob-client';
+import chalk from 'chalk';
+import axios from 'axios';
+import process from 'process';
 
-// CONFIGURATION
+// Get current directory for logging
+const cwd = process.cwd();
+
+console.log(chalk.cyan(`> DEBUG: Running on ${process.platform} in directory: ${cwd}`));
+
+// --- CONFIGURATION ---
 const CONFIG = {
     maxEntryPrice: parseFloat(process.env.MAX_ENTRY_PRICE || '0.95'),
     minPriceDelta: parseFloat(process.env.MIN_PRICE_DELTA || '5.0'), 
@@ -18,25 +23,38 @@ const CONFIG = {
     rpcUrl: process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com',
 };
 
-// VALIDATION
+// --- VALIDATION ---
 const pKey = process.env.PRIVATE_KEY || "";
 const apiKey = process.env.POLY_API_KEY || "";
 
 if (!pKey || !apiKey || pKey.includes("your_polygon_wallet")) {
     console.error(chalk.bgRed.white('\n FATAL ERROR: CREDENTIALS MISSING \n'));
-    console.error(chalk.red('1. Open the file called ".env" in this folder.'));
-    console.error(chalk.red('2. Paste your real Private Key and Polymarket API Keys.'));
-    console.error(chalk.red('3. Save and run "node bot.js" again.\n'));
     process.exit(1);
 }
 
-// State
+// --- STATE ---
 let activeMarkets = []; 
 let isProcessing = false;
 let ticks = 0;
 
-console.log(chalk.bgGreen.black(`\n> PANCHOPOLYBOT: BINARY OPTION ENGINE v2.6 (MAC/LOCAL EDITION)\n`));
+console.log(chalk.bgGreen.black(`\n> PANCHOPOLYBOT: PRODUCTION ENGINE v4.0 (REAL-TIME)\n`));
 
+// --- UI SERVER SETUP ---
+// This allows the frontend to see what the bot is doing
+const WSS_PORT = 8080;
+const wss = new WebSocketServer({ port: WSS_PORT });
+console.log(chalk.magenta(`> UI SERVER: Broadcasting on ws://localhost:${WSS_PORT}`));
+
+function broadcast(type, payload) {
+    const message = JSON.stringify({ type, timestamp: Date.now(), payload });
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+    });
+}
+
+// --- POLYMARKET SETUP ---
 const provider = new ethers.JsonRpcProvider(CONFIG.rpcUrl);
 const wallet = new ethers.Wallet(pKey, provider);
 
@@ -51,13 +69,12 @@ const clobClient = new ClobClient(
     }
 );
 
-// HELPER: Get historical candle
 async function getBinanceOpenPrice(timestampMs) {
     try {
         const url = `https://api.binance.com/api/v3/klines?symbol=${CONFIG.binanceSymbol.toUpperCase()}&interval=1m&startTime=${timestampMs}&limit=1`;
         const res = await axios.get(url);
         if (res.data && res.data.length > 0) {
-            return parseFloat(res.data[0][1]); // [1] is 'Open' price
+            return parseFloat(res.data[0][1]);
         }
     } catch (e) {
         console.error(chalk.red(`> Failed to fetch historical start price: ${e.message}`));
@@ -65,33 +82,23 @@ async function getBinanceOpenPrice(timestampMs) {
     return null;
 }
 
-// 1. DISCOVERY PHASE
 async function resolveMarkets(slugs) {
     console.log(chalk.yellow(`> Resolving ${slugs.length} Up/Down Markets...`));
-    
+    broadcast('LOG', { message: `Resolving ${slugs.length} markets...` });
+
     for (const slug of slugs) {
         try {
             const response = await axios.get(`https://gamma-api.polymarket.com/events?slug=${slug}`);
-            if (response.data.length === 0) {
-                console.error(chalk.red(`> Market not found: ${slug}`));
-                continue;
-            }
+            if (response.data.length === 0) { console.error(chalk.red(`> Market not found: ${slug}`)); continue; }
 
             const market = response.data[0].markets[0];
-            let upTokenId = null;
+            let upTokenId = null; 
             let downTokenId = null;
             
-            // --- v2.6 FIX: ROBUST ID PARSING ---
             let tokenIds = market.clobTokenIds;
             if (typeof tokenIds === 'string') {
-                try {
-                    tokenIds = JSON.parse(tokenIds);
-                } catch(e) {
-                    console.error(chalk.red(`> Error parsing clobTokenIds for ${slug}: ${e.message}`));
-                    continue;
-                }
+                try { tokenIds = JSON.parse(tokenIds); } catch(e) {}
             }
-            // -----------------------------------
             
             const outcomes = JSON.parse(market.outcomes);
             outcomes.forEach((outcomeName, index) => {
@@ -100,68 +107,49 @@ async function resolveMarkets(slugs) {
                 if (name === 'DOWN') downTokenId = tokenIds[index];
             });
 
-            if (!upTokenId || !downTokenId) {
-                console.warn(chalk.red(`> Skipped ${slug}: Could not map UP/DOWN. IDs found: ${JSON.stringify(tokenIds)}`));
-                continue;
-            }
+            if (!upTokenId || !downTokenId) continue;
             
-            // Start Date Check
-            const startDate = new Date(market.startDate);
-            const startTs = startDate.getTime();
-
-            console.log(chalk.blue(`> Fetching Reference Price for ${slug}...`));
-            let referencePrice = await getBinanceOpenPrice(startTs);
-            
-            // If strictly in future, wait (or use current price for testing)
+            const startTs = new Date(market.startDate).getTime();
             if (Date.now() < startTs) {
                 console.log(chalk.gray(`> Market ${slug} hasn't started yet. Waiting...`));
                 continue;
             }
 
-            if (!referencePrice) {
-                 console.warn(chalk.red(`> Could not find reference price for ${slug}. Skipping.`));
-                 continue;
-            }
+            let referencePrice = await getBinanceOpenPrice(startTs);
+            if (!referencePrice) continue;
             
-            console.log(chalk.green(`> LOCKED: ${slug}`));
-            console.log(chalk.green(`  Ref Price: $${referencePrice}`));
-            console.log(chalk.green(`  UP ID:   ${upTokenId}`));
-            console.log(chalk.green(`  DOWN ID: ${downTokenId}`));
+            console.log(chalk.green(`> LOCKED: ${slug} | Ref: $${referencePrice}`));
             
-            activeMarkets.push({
+            // Inform UI of the market lock
+            broadcast('MARKET_LOCKED', {
                 slug: slug,
-                upId: upTokenId,
-                downId: downTokenId,
                 referencePrice: referencePrice,
-                lastTrade: 0
+                upId: upTokenId,
+                downId: downTokenId
             });
-            
-        } catch (e) {
-            console.error(chalk.red(`> Error resolving ${slug}: ${e.message}`));
-        }
-    }
 
-    if (activeMarkets.length === 0) {
-        console.error(chalk.red('> No active markets ready. Exiting.'));
-        process.exit(1);
+            activeMarkets.push({
+                slug: slug, upId: upTokenId, downId: downTokenId, referencePrice: referencePrice, lastTrade: 0
+            });
+        } catch (e) { console.error(chalk.red(`> Error: ${e.message}`)); }
     }
-    
-    console.log(chalk.blue(`> Engine Ready. Connecting to Binance Stream...`));
-    startTrading();
+    if (activeMarkets.length === 0) { 
+        console.error(chalk.red("No active markets found. Check your slug in .env"));
+        broadcast('ERROR', { message: 'No active markets found' });
+        // Don't exit process so UI stays connected
+    } else {
+        console.log(chalk.blue(`> Engine Ready. Connecting to Binance Stream...`));
+        startTrading();
+    }
 }
 
-// 2. EXECUTION PHASE
 function startTrading() {
     const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${CONFIG.binanceSymbol}@trade`);
-
-    ws.on('open', () => console.log(chalk.blue('> WebSocket Connected.')));
-
-    setInterval(() => {
-        if (activeMarkets.length > 0) {
-            process.stdout.write(chalk.gray(`\r> [HEARTBEAT] Scanning ${activeMarkets.length} mkts | Ticks: ${ticks}   `));
-        }
-    }, 5000);
-
+    ws.on('open', () => {
+        console.log(chalk.blue('> WebSocket Connected.'));
+        broadcast('STATUS', { status: 'RUNNING' });
+    });
+    
     ws.on('message', async (data) => {
         ticks++;
         if (isProcessing) return;
@@ -169,55 +157,59 @@ function startTrading() {
         try {
             const trade = JSON.parse(data);
             const spotPrice = parseFloat(trade.p);
+            
+            // Broadcast every price tick to UI
+            // We find the first active market to calculate a delta for visualization
+            if (activeMarkets.length > 0) {
+                const m = activeMarkets[0];
+                broadcast('PRICE_UPDATE', {
+                    sourcePrice: spotPrice,
+                    referencePrice: m.referencePrice,
+                    delta: spotPrice - m.referencePrice,
+                    slug: m.slug
+                });
+            }
+
             await checkArbitrage(spotPrice);
-        } catch (e) { console.error(e); }
+        } catch (e) { }
         isProcessing = false;
     });
-
-    ws.on('close', () => {
-        console.log(chalk.yellow('\n> WebSocket disconnected. Reconnecting...'));
-        setTimeout(startTrading, 2000);
-    });
-
-    ws.on('error', (err) => {
-        console.error(chalk.red('\n> WebSocket Error:', err.message));
-        ws.terminate();
-    });
+    ws.on('close', () => setTimeout(startTrading, 2000));
+    ws.on('error', () => ws.terminate());
 }
 
 async function checkArbitrage(spotPrice) {
     const promises = activeMarkets.map(async (market) => {
         if (Date.now() - market.lastTrade < 5000) return;
-
         const delta = spotPrice - market.referencePrice;
         const absDelta = Math.abs(delta);
-
+        
         if (absDelta < CONFIG.minPriceDelta) return;
 
         const winningTokenId = delta > 0 ? market.upId : market.downId;
         const direction = delta > 0 ? "UP" : "DOWN";
 
-        // SAFETY v2.6: STRICT CHECK
-        if (!winningTokenId || typeof winningTokenId !== 'string' || winningTokenId.length < 15) {
-            return;
-        }
+        if (!winningTokenId || typeof winningTokenId !== 'string' || winningTokenId.length < 15) return;
 
         try {
             const orderbook = await clobClient.getOrderBook(winningTokenId);
             if (!orderbook.asks || orderbook.asks.length === 0) return;
-
             const bestAsk = parseFloat(orderbook.asks[0].price);
             
             if (bestAsk <= CONFIG.maxEntryPrice) {
                 console.log(chalk.bgGreen.black(`\n SNIPE SIGNAL `));
                 console.log(`Delta: ${delta.toFixed(2)} | Target: ${direction} | Price: ${bestAsk}`);
+                
+                broadcast('SNIPE_SIGNAL', {
+                    direction: direction,
+                    delta: delta,
+                    price: bestAsk,
+                    market: market.slug
+                });
+
                 await executeTrade(market, winningTokenId, bestAsk, direction);
             }
-        } catch (err) { 
-            if (!err.message.includes('404')) {
-                console.error(chalk.red(`\n> Orderbook Error: ${err.message}`));
-            }
-        }
+        } catch (err) {}
     });
     await Promise.all(promises);
 }
@@ -225,25 +217,30 @@ async function checkArbitrage(spotPrice) {
 async function executeTrade(market, tokenId, price, direction) {
     console.log(chalk.yellow(`> EXECUTING ${direction} ORDER...`));
     market.lastTrade = Date.now();
-    
     try {
         const rawSize = CONFIG.betSizeUSDC / price;
         const size = Math.floor(rawSize * 100) / 100; 
-
         const order = await clobClient.createOrder({
-            tokenID: tokenId,
-            price: price, 
-            side: Side.BUY,
-            size: size,
-            feeRateBps: 0,
-            nonce: Date.now(),
+            tokenID: tokenId, price: price, side: Side.BUY, size: size, feeRateBps: 0, nonce: Date.now(),
         });
-
         const resp = await clobClient.postOrder(order);
         console.log(chalk.green(`> ORDER SUBMITTED: ${resp.orderID}`));
         
-    } catch (e) {
+        broadcast('TRADE_EXECUTED', {
+            id: resp.orderID,
+            asset: market.slug,
+            type: direction,
+            amount: CONFIG.betSizeUSDC,
+            price: price,
+            status: 'SUCCESS'
+        });
+
+    } catch (e) { 
         console.error(chalk.red(`> TRADE FAILED: ${e.message}`));
+        broadcast('TRADE_FAILED', {
+            error: e.message,
+            asset: market.slug
+        });
     }
 }
 
