@@ -1,9 +1,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import WebSocket from 'ws';
-const WebSocketServer = WebSocket.Server;
-
+import WebSocket, { WebSocketServer } from 'ws';
 import { ethers } from 'ethers';
 import { ClobClient, Side } from '@polymarket/clob-client';
 import chalk from 'chalk';
@@ -11,7 +9,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v6.3 (FAIL-SAFE)";
+const VERSION = "v6.4 (TARGET: JAN 7 2AM)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -23,7 +21,8 @@ const CONFIG = {
     minPriceDelta: parseFloat(process.env.MIN_PRICE_DELTA || '5.0'), 
     betSizeUSDC: parseFloat(process.env.BET_SIZE_USDC || '10'),
     binanceSymbol: process.env.BINANCE_SYMBOL || 'btcusdt',
-    marketSlugs: (process.env.MARKET_SLUG || '').split(',').map(s => s.trim()).filter(s => s),
+    // UPDATED: Defaults directly to your requested market
+    marketSlugs: (process.env.MARKET_SLUG || 'bitcoin-up-or-down-january-7-2am-et').split(',').map(s => s.trim()).filter(s => s),
     rpcUrl: process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com',
 };
 
@@ -79,12 +78,13 @@ function broadcast(type, payload) {
 
 // --- POLYMARKET SETUP ---
 const provider = new ethers.JsonRpcProvider(CONFIG.rpcUrl);
-const wallet = new ethers.Wallet(pKey, provider);
+// Cast wallet to any to resolve type mismatch between ethers v6 and clob-client expected types
+const wallet = /** @type {any} */ (new ethers.Wallet(pKey, provider));
 
 const clobClient = new ClobClient(
     'https://clob.polymarket.com/', 
     137, 
-    /** @type {any} */ (wallet), 
+    wallet, 
     {
         apiKey: process.env.POLY_API_KEY,
         apiSecret: process.env.POLY_API_SECRET,
@@ -107,6 +107,7 @@ async function getBinanceOpenPrice(timestampMs) {
 
 async function resolveMarkets(slugs) {
     console.log(chalk.yellow(`> Resolving ${slugs.length} Up/Down Markets...`));
+    console.log(chalk.yellow(`> Target Slug: ${slugs[0]}`)); // Explicitly log the target
     broadcast('LOG', { message: `Resolving ${slugs.length} markets...` });
 
     for (const slug of slugs) {

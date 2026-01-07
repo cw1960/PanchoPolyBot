@@ -9,7 +9,7 @@ export const Dashboard: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
   const [activeMarket, setActiveMarket] = useState<string>('Scanning Markets...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [newSlug, setNewSlug] = useState('');
+  const [newSlug, setNewSlug] = useState('bitcoin-up-or-down-january-7-2am-et');
   
   const [data, setData] = useState<PricePoint[]>([]);
   const [trades, setTrades] = useState<TradeLog[]>([]);

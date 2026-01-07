@@ -1,9 +1,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import WebSocket from 'ws';
-const WebSocketServer = WebSocket.Server;
-
+import WebSocket, { WebSocketServer } from 'ws';
 import { ethers } from 'ethers';
 import { ClobClient, Side } from '@polymarket/clob-client';
 import chalk from 'chalk';
@@ -85,12 +83,13 @@ function broadcast(type, payload) {
 
 // --- POLYMARKET SETUP ---
 const provider = new ethers.JsonRpcProvider(CONFIG.rpcUrl);
-const wallet = new ethers.Wallet(pKey, provider);
+// Cast to any to resolve Type mismatch between ethers v6 and clob-client
+const wallet = /** @type {any} */ (new ethers.Wallet(pKey, provider));
 
 const clobClient = new ClobClient(
     'https://clob.polymarket.com/', 
     137, 
-    /** @type {any} */ (wallet), 
+    wallet, 
     {
         apiKey: process.env.POLY_API_KEY,
         apiSecret: process.env.POLY_API_SECRET,
