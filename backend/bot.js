@@ -9,7 +9,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v6.0 (FINAL - JS)";
+const VERSION = "v6.10 (LEGACY JS FIX)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -21,7 +21,7 @@ const CONFIG = {
     minPriceDelta: parseFloat(process.env.MIN_PRICE_DELTA || '5.0'), 
     betSizeUSDC: parseFloat(process.env.BET_SIZE_USDC || '10'),
     binanceSymbol: process.env.BINANCE_SYMBOL || 'btcusdt',
-    marketSlugs: (process.env.MARKET_SLUG || '').split(',').map(s => s.trim()).filter(s => s),
+    marketSlugs: (process.env.MARKET_SLUG || '').split(',').map(s => s.trim().split('?')[0]).filter(s => s), // SANITIZED
     rpcUrl: process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com',
 };
 
@@ -81,8 +81,9 @@ async function getBinanceOpenPrice(timestampMs) {
     return null;
 }
 
-async function resolveMarkets(slugs) {
-    console.log(chalk.yellow(`> Resolving ${slugs.length} Up/Down Markets...`));
+async function resolveMarkets(rawSlugs) {
+    const slugs = rawSlugs.map(s => s.split('?')[0].trim());
+    console.log(chalk.yellow(`> Resolving: ${JSON.stringify(slugs)}`));
     broadcast('LOG', { message: `Resolving ${slugs.length} markets...` });
 
     for (const slug of slugs) {
@@ -156,8 +157,6 @@ function startTrading() {
             const trade = JSON.parse(data);
             const spotPrice = parseFloat(trade.p);
             
-            // Broadcast every price tick to UI
-            // We find the first active market to calculate a delta for visualization
             if (activeMarkets.length > 0) {
                 const m = activeMarkets[0];
                 broadcast('PRICE_UPDATE', {

@@ -3,7 +3,7 @@ import { BotConfig, PricePoint, TradeLog } from '../types';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts';
-import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff, Copy, FolderSearch, RefreshCw, AlertTriangle, XCircle, ArrowRight, Save, Link } from 'lucide-react';
+import { Play, Pause, Activity, TrendingUp, DollarSign, Terminal, Settings, Search, Check, Loader2, Network, ArrowUpCircle, ArrowDownCircle, Info, Wifi, WifiOff, Copy, FolderSearch, RefreshCw, AlertTriangle, XCircle, ArrowRight, Save, Link, Edit2 } from 'lucide-react';
 
 export const Dashboard: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
@@ -15,6 +15,7 @@ export const Dashboard: React.FC = () => {
   const [betSize, setBetSize] = useState('10');
   const [maxEntry, setMaxEntry] = useState('0.95');
   const [minDelta, setMinDelta] = useState('5.0');
+  const [refPrice, setRefPrice] = useState(''); // Manual Override
   
   const [data, setData] = useState<PricePoint[]>([]);
   const [trades, setTrades] = useState<TradeLog[]>([]);
@@ -73,8 +74,13 @@ export const Dashboard: React.FC = () => {
                 setActiveMarket(`${msg.payload.slug}`);
                 setErrorMsg(null);
                 
-                // Sync UI with what the bot reports (optional, but good for confirmation)
+                // Sync UI with what the bot reports
                 setNewSlug(msg.payload.slug); 
+                
+                // Set Ref Price only if it's not currently being edited by user (or if it's empty)
+                if (msg.payload.referencePrice) {
+                    setRefPrice(msg.payload.referencePrice.toString());
+                }
                 
                 setConfig(prev => ({
                     ...prev,
@@ -142,18 +148,24 @@ export const Dashboard: React.FC = () => {
     setActiveMarket('Updating...');
     setErrorMsg(null);
     
+    // Auto-clean the slug before sending (removing ?tid=...)
+    // This is the critical fix for copy-pasted URLs
+    const cleanSlug = newSlug.trim().split('?')[0];
+    setNewSlug(cleanSlug); 
+    
     // If market slug changed, clear chart for visual clarity
-    if (newSlug.trim() !== activeMarket) {
+    if (cleanSlug !== activeMarket) {
         setData([]); 
     }
     
     ws.current.send(JSON.stringify({
         type: 'UPDATE_CONFIG',
         payload: { 
-            slug: newSlug.trim(),
+            slug: cleanSlug,
             betSize: parseFloat(betSize),
             maxEntryPrice: parseFloat(maxEntry),
-            minPriceDelta: parseFloat(minDelta)
+            minPriceDelta: parseFloat(minDelta),
+            referencePrice: parseFloat(refPrice)
         }
     }));
   };
@@ -364,6 +376,25 @@ export const Dashboard: React.FC = () => {
                 </h3>
                 
                 <div className="space-y-4">
+                    {/* Ref Price Override */}
+                    <div className="space-y-1 bg-yellow-900/10 border border-yellow-700/30 p-2 rounded">
+                        <div className="flex items-center justify-between">
+                            <label className="text-[9px] uppercase font-bold text-yellow-500 flex items-center gap-1">
+                                <Edit2 size={10} /> Ref Price Override
+                            </label>
+                        </div>
+                        <input 
+                            type="number" 
+                            value={refPrice} 
+                            onChange={(e) => setRefPrice(e.target.value)} 
+                            placeholder="Current Ref Price"
+                            className="bg-black/50 border border-zinc-700 rounded px-2 py-1.5 text-xs font-mono text-white w-full focus:outline-none focus:border-yellow-500" 
+                        />
+                        <div className="text-[9px] text-zinc-500 leading-tight">
+                            Use this to fix discrepancies between Binance and Polymarket's "Price to Beat".
+                        </div>
+                    </div>
+
                     {/* Strategy Parameters */}
                     <div className="grid grid-cols-3 gap-2">
                         <div className="space-y-1">

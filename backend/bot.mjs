@@ -10,7 +10,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v6.7 (WAITING FOR DASHBOARD)";
+const VERSION = "v6.10 (SLUG FIX FINAL)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -48,28 +48,59 @@ const wss = new WebSocketServer({ port: WSS_PORT });
 console.log(chalk.magenta(`> UI SERVER: Listening on ws://localhost:${WSS_PORT}`));
 
 wss.on('connection', (ws) => {
+    // 1. IMMEDIATE SYNC: Send current state to new client so they don't see "Idle"
+    if (activeMarkets.length > 0) {
+         const m = activeMarkets[0];
+         ws.send(JSON.stringify({
+            type: 'MARKET_LOCKED',
+            timestamp: Date.now(),
+            payload: {
+                slug: m.slug,
+                referencePrice: m.referencePrice,
+                upId: m.upId,
+                downId: m.downId
+            }
+        }));
+    }
+
     ws.on('message', async (message) => {
         try {
             const data = JSON.parse(message);
             
             // --- UPDATE CONFIG HANDLER ---
             if (data.type === 'UPDATE_CONFIG') {
-                const { slug, betSize, maxEntryPrice, minPriceDelta } = data.payload;
+                const { slug, betSize, maxEntryPrice, minPriceDelta, referencePrice } = data.payload;
                 
                 // 1. Update Strategy Parameters
                 if (betSize !== undefined) CONFIG.betSizeUSDC = parseFloat(betSize);
                 if (maxEntryPrice !== undefined) CONFIG.maxEntryPrice = parseFloat(maxEntryPrice);
                 if (minPriceDelta !== undefined) CONFIG.minPriceDelta = parseFloat(minPriceDelta);
 
-                const newSlug = slug ? slug.trim() : null;
+                // Sanitize slug just in case UI didn't catch it
+                const newSlug = slug ? slug.trim().split('?')[0] : null;
+                const newRefPrice = referencePrice ? parseFloat(referencePrice) : null;
                 
                 console.log(chalk.magenta(`\n> UI CONFIG UPDATE:`));
                 console.log(chalk.dim(`  Bet Size: $${CONFIG.betSizeUSDC}`));
                 console.log(chalk.dim(`  Max Entry: $${CONFIG.maxEntryPrice}`));
                 console.log(chalk.dim(`  Min Delta: $${CONFIG.minPriceDelta}`));
 
-                // 2. Handle Market Switch if Slug Changed
-                if (newSlug) {
+                // 2. Handle Ref Price Override (Critical for accuracy)
+                if (newRefPrice && activeMarkets.length > 0 && (!newSlug || newSlug === activeMarkets[0].slug)) {
+                    activeMarkets[0].referencePrice = newRefPrice;
+                    console.log(chalk.yellow(`  Updated Ref Price to: $${newRefPrice} (Manual Override)`));
+                    
+                    // Re-broadcast lock to confirm to UI
+                    broadcast('MARKET_LOCKED', {
+                        slug: activeMarkets[0].slug,
+                        referencePrice: newRefPrice,
+                        upId: activeMarkets[0].upId,
+                        downId: activeMarkets[0].downId
+                    });
+                }
+
+                // 3. Handle Market Switch if Slug Changed
+                if (newSlug && (activeMarkets.length === 0 || newSlug !== activeMarkets[0].slug)) {
                      console.log(chalk.magenta(`  Switching Market: ${newSlug}`));
                      broadcast('LOG', { message: `Reconfiguring for ${newSlug}...` });
                      
@@ -78,7 +109,7 @@ wss.on('connection', (ws) => {
                      CONFIG.marketSlugs = [newSlug];
                      await resolveMarkets(CONFIG.marketSlugs);
                 } else {
-                     broadcast('LOG', { message: `Strategy Updated (No Market Change)` });
+                     broadcast('LOG', { message: `Strategy Updated` });
                 }
             }
         } catch (e) {
@@ -126,9 +157,11 @@ async function getBinanceOpenPrice(timestampMs) {
     return null;
 }
 
-async function resolveMarkets(slugs) {
-    console.log(chalk.yellow(`> Resolving ${slugs.length} Up/Down Markets...`));
-    console.log(chalk.yellow(`> Target Slug: ${slugs[0]}`)); // Explicitly log the target
+async function resolveMarkets(rawSlugs) {
+    // SANITIZE: Remove query params from slugs (e.g. ?tid=...)
+    const slugs = rawSlugs.map(s => s.split('?')[0].trim());
+
+    console.log(chalk.yellow(`> Resolving: ${JSON.stringify(slugs)}`));
     broadcast('LOG', { message: `Resolving ${slugs.length} markets...` });
 
     for (const slug of slugs) {
