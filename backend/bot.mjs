@@ -10,7 +10,7 @@ import axios from 'axios';
 import process from 'process';
 
 // --- VERSION CHECK ---
-const VERSION = "v6.12 (TID AWARE FIX)";
+const VERSION = "v6.13 (DIRECT TID LOOKUP)";
 console.log(chalk.bgBlue.white.bold(`\n------------------------------------------------`));
 console.log(chalk.bgBlue.white.bold(` PANCHOPOLYBOT: ${VERSION} `));
 console.log(chalk.bgBlue.white.bold(` UI SERVER: ENABLED (Port 8080)                 `));
@@ -160,7 +160,6 @@ async function getBinanceOpenPrice(timestampMs) {
 }
 
 async function resolveMarkets(rawSlugs) {
-    // DO NOT aggressively split everything. Handle 'tid' param.
     
     for (const rawSlug of rawSlugs) {
         let cleanSlug = rawSlug;
@@ -180,34 +179,49 @@ async function resolveMarkets(rawSlugs) {
         broadcast('LOG', { message: `Resolving ${cleanSlug}...` });
 
         try {
-            const response = await axios.get(`https://gamma-api.polymarket.com/events?slug=${cleanSlug}`);
-            if (response.data.length === 0) { 
-                console.error(chalk.red(`> Market not found: ${cleanSlug}`)); 
-                broadcast('ERROR', { message: `Market Not Found: ${cleanSlug}` });
-                continue; 
-            }
-
-            // The 'event' object
-            const eventData = response.data[0];
-            const markets = eventData.markets;
-
             let targetMarket = null;
 
+            // --- STRATEGY 1: DIRECT TID LOOKUP ---
+            // If we have a TID, we skip the slug search and go straight to the market endpoint.
+            // This fixes issues where the URL slug doesn't match the API slug.
             if (specificTid) {
-                // User provided a specific ID, filter for it
-                targetMarket = markets.find(m => m.id === specificTid || (m.clobTokenIds && JSON.stringify(m.clobTokenIds).includes(specificTid)));
-                if (!targetMarket) {
-                     console.error(chalk.red(`> TID ${specificTid} not found in event.`)); 
-                     broadcast('ERROR', { message: `TID ${specificTid} Not Found` });
-                     continue;
+                try {
+                    console.log(chalk.blue(`> Attempting Direct Lookup via TID: ${specificTid}`));
+                    const directRes = await axios.get(`https://gamma-api.polymarket.com/markets/${specificTid}`);
+                    if (directRes.data) {
+                        targetMarket = directRes.data;
+                        console.log(chalk.green(`> FOUND VIA TID!`));
+                    }
+                } catch (tidErr) {
+                    console.log(chalk.yellow(`> Direct TID lookup failed (${tidErr.message}). Falling back to slug search...`));
                 }
-            } else {
-                // Default to first market if no TID (dangerous for these 15m markets, but standard behavior)
-                targetMarket = markets[0];
+            }
+
+            // --- STRATEGY 2: SLUG SEARCH ---
+            if (!targetMarket) {
+                const response = await axios.get(`https://gamma-api.polymarket.com/events?slug=${cleanSlug}`);
+                if (response.data.length > 0) { 
+                    const eventData = response.data[0];
+                    const markets = eventData.markets;
+
+                    if (specificTid) {
+                        // User provided a specific ID, filter for it
+                        // Use loose equality (==) because API IDs can be strings or numbers
+                        targetMarket = markets.find(m => m.id == specificTid || (m.clobTokenIds && JSON.stringify(m.clobTokenIds).includes(specificTid)));
+                    } else {
+                        targetMarket = markets[0];
+                    }
+                }
+            }
+
+            if (!targetMarket) {
+                 console.error(chalk.red(`> Market not found via TID or Slug.`)); 
+                 broadcast('ERROR', { message: `Market Not Found` });
+                 continue; 
             }
             
             if (targetMarket.closed) {
-                 console.error(chalk.red(`> SKIPPING: ${cleanSlug} is already CLOSED.`)); 
+                 console.error(chalk.red(`> SKIPPING: Market is already CLOSED.`)); 
                  broadcast('ERROR', { message: `Market Closed` });
                  continue; 
             }
@@ -229,7 +243,7 @@ async function resolveMarkets(rawSlugs) {
             });
 
             if (!upTokenId || !downTokenId) {
-                console.error(chalk.red(`> Could not identify UP/DOWN/YES/NO tokens for ${cleanSlug}`));
+                console.error(chalk.red(`> Could not identify UP/DOWN/YES/NO tokens`));
                 broadcast('ERROR', { message: `Tokens Not Found` });
                 continue;
             }
@@ -238,15 +252,14 @@ async function resolveMarkets(rawSlugs) {
             
             let referencePrice = await getBinanceOpenPrice(startTs);
             if (!referencePrice) {
-                 console.log(chalk.red(`> Could not fetch reference price for ${cleanSlug}`));
-                 // Don't error out, maybe user will provide override
+                 console.log(chalk.red(`> Could not fetch reference price. Using 0 (Expect Manual Override).`));
                  referencePrice = 0; 
             }
             
-            console.log(chalk.green(`> LOCKED: ${cleanSlug} | TID: ${targetMarket.id}`));
+            console.log(chalk.green(`> LOCKED: ${targetMarket.id} | Ref: $${referencePrice}`));
             
             broadcast('MARKET_LOCKED', {
-                slug: rawSlug, // Return the full slug to UI so input doesn't flicker
+                slug: rawSlug, 
                 referencePrice: referencePrice,
                 upId: upTokenId,
                 downId: downTokenId
@@ -260,7 +273,7 @@ async function resolveMarkets(rawSlugs) {
                 lastTrade: 0
             });
         } catch (e) { 
-            console.error(chalk.red(`> Error resolving ${cleanSlug}: ${e.message}`));
+            console.error(chalk.red(`> Error resolving: ${e.message}`));
             broadcast('ERROR', { message: `API Error: ${e.message}` });
         }
     }
