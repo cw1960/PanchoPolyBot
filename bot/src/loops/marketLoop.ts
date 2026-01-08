@@ -20,7 +20,7 @@ export class MarketLoop {
     this.active = true;
     Logger.info(`Starting Market Loop for ${this.market.polymarket_market_id}`);
 
-    // Poll at defined interval
+    // Poll at defined interval (e.g., 1000ms or 2000ms)
     this.intervalId = setInterval(() => {
       this.tick();
     }, ENV.POLL_INTERVAL_MS);
@@ -34,7 +34,6 @@ export class MarketLoop {
   }
 
   public updateConfig(newConfig: Market) {
-    // In strict TS, we can't just assign if readonly, but for this scaffold pattern:
     (this.market as any) = newConfig; 
   }
 
@@ -46,32 +45,32 @@ export class MarketLoop {
       const observation = await this.edgeEngine.observe(this.market);
 
       if (!observation) {
-        // Logger.warn(`No price data for ${this.market.asset}`);
         return;
       }
 
-      // 2. Determine UI Status
+      // 2. Determine UI Status based on confidence
       let status: 'WATCHING' | 'OPPORTUNITY' = 'WATCHING';
       if (observation.confidence > 0.6) status = 'OPPORTUNITY';
 
-      // 3. Log Significant Events
+      // 3. Log Significant Events (Only if confident)
       if (status === 'OPPORTUNITY') {
-         Logger.info(`[EDGE DETECTED] ${this.market.asset} Delta: ${observation.delta.toFixed(2)} Conf: ${(observation.confidence * 100).toFixed(0)}%`);
+         Logger.info(`[EDGE] ${this.market.asset} Delta: $${observation.delta.toFixed(2)} Conf: ${(observation.confidence * 100).toFixed(0)}%`);
       }
 
-      // 4. Write State to DB (Eyes for the UI)
+      // 4. Write State to DB (The "Eyes" for the UI)
       const stateRow: MarketStateRow = {
         market_id: this.market.id,
-        status: status as any, // Cast to match DB enum if needed
+        status: status as any,
         chainlink_price: observation.chainlink.price,
         spot_price_median: observation.spot.price,
         delta: observation.delta,
         direction: observation.direction,
         confidence: observation.confidence,
-        exposure: 0, // No trading yet
+        exposure: 0, // Read-only step, no trades yet
         last_update: new Date().toISOString()
       };
 
+      // Fire and forget update to keep loop fast
       const { error } = await supabase
         .from('market_state')
         .upsert(stateRow);

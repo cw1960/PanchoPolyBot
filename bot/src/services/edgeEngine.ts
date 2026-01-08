@@ -14,7 +14,7 @@ export class EdgeEngine {
   }
 
   public async observe(market: Market): Promise<MarketObservation | null> {
-    const asset = market.asset || 'BTC'; // Default to BTC if undefined
+    const asset = market.asset || 'BTC'; // Default to BTC
     
     // 1. Fetch Data Concurrently
     const [clData, spotPrice] = await Promise.all([
@@ -26,30 +26,27 @@ export class EdgeEngine {
       return null;
     }
 
-    // 2. Calculate Logic
+    // 2. Calculate Edge Logic
     const delta = spotPrice - clData.price;
     const absDelta = Math.abs(delta);
     let direction: 'UP' | 'DOWN' | 'NEUTRAL' = 'NEUTRAL';
     let confidence = 0.0;
 
-    // 3. Determine Edge
-    // If Spot is significantly > Chainlink, Chainlink will likely move UP.
-    // If Spot is significantly < Chainlink, Chainlink will likely move DOWN.
-    
-    // Thresholds (Simulated for Step 5 - would be dynamic in production)
+    // Threshold: How much must spot deviate before we consider it "Real" movement?
     const NOISE_THRESHOLD = market.min_price_delta || 10.0; 
     
     if (absDelta > NOISE_THRESHOLD) {
       direction = delta > 0 ? 'UP' : 'DOWN';
       
-      // Heuristic: Confidence scales with deviation
-      // e.g. $50 delta = 0.5 confidence, $100 delta = 0.9 confidence (clamped)
-      confidence = Math.min(absDelta / 100, 0.99); 
+      // Heuristic: Confidence increases as the delta grows larger than the threshold
+      // e.g., if delta is $100 and threshold is $10, we are very confident.
+      const excess = absDelta - NOISE_THRESHOLD;
+      confidence = Math.min(excess / 50, 0.99); // Max confidence at $50+ excess
     }
 
     return {
-      chainlink: { price: clData.price, timestamp: clData.timestamp, source: 'Chainlink' },
-      spot: { price: spotPrice, timestamp: Date.now(), source: 'Median(Binance,Coinbase)' },
+      chainlink: { price: clData.price, timestamp: clData.timestamp, source: 'Chainlink Oracle' },
+      spot: { price: spotPrice, timestamp: Date.now(), source: 'Spot Median' },
       delta,
       direction,
       confidence,
