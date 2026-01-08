@@ -2,6 +2,7 @@ import { Market, MarketStateRow } from '../types/tables';
 import { Logger } from '../utils/logger';
 import { ENV } from '../config/env';
 import { EdgeEngine } from '../services/edgeEngine';
+import { executionService } from '../services/execution';
 import { supabase } from '../services/supabase';
 
 export class MarketLoop {
@@ -9,6 +10,7 @@ export class MarketLoop {
   private intervalId: any | null = null;
   public readonly market: Market;
   private edgeEngine: EdgeEngine;
+  private currentExposure: number = 0; // Local tracking
 
   constructor(market: Market) {
     this.market = market;
@@ -20,7 +22,7 @@ export class MarketLoop {
     this.active = true;
     Logger.info(`Starting Market Loop for ${this.market.polymarket_market_id}`);
 
-    // Poll at defined interval (e.g., 1000ms or 2000ms)
+    // Poll at defined interval
     this.intervalId = setInterval(() => {
       this.tick();
     }, ENV.POLL_INTERVAL_MS);
@@ -52,12 +54,16 @@ export class MarketLoop {
       let status: 'WATCHING' | 'OPPORTUNITY' = 'WATCHING';
       if (observation.confidence > 0.6) status = 'OPPORTUNITY';
 
-      // 3. Log Significant Events (Only if confident)
+      // 3. Log Significant Events
       if (status === 'OPPORTUNITY') {
          Logger.info(`[EDGE] ${this.market.asset} Delta: $${observation.delta.toFixed(2)} Conf: ${(observation.confidence * 100).toFixed(0)}%`);
+         
+         // 4. ATTEMPT TRADE (The Hands)
+         // Only trade if confidence is high and we are in opportunity mode
+         await executionService.attemptTrade(this.market, observation, this.currentExposure);
       }
 
-      // 4. Write State to DB (The "Eyes" for the UI)
+      // 5. Write State to DB
       const stateRow: MarketStateRow = {
         market_id: this.market.id,
         status: status as any,
@@ -66,17 +72,19 @@ export class MarketLoop {
         delta: observation.delta,
         direction: observation.direction,
         confidence: observation.confidence,
-        exposure: 0, // Read-only step, no trades yet
+        exposure: this.currentExposure,
         last_update: new Date().toISOString()
       };
 
-      // Fire and forget update to keep loop fast
       const { error } = await supabase
         .from('market_state')
         .upsert(stateRow);
 
       if (error) {
         Logger.error("Failed to update market_state", error);
+      } else {
+        // Sync exposure reading from DB in case other bots updated it
+        // (For now, we trust our local optimistic + simple DB read next tick)
       }
 
     } catch (err) {

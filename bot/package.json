@@ -1,6 +1,6 @@
 {
   "name": "polymarket-bot-vps",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "VPS execution engine for Polymarket arbitrage",
   "main": "dist/index.js",
   "scripts": {
@@ -11,7 +11,9 @@
   "dependencies": {
     "dotenv": "^16.3.1",
     "@supabase/supabase-js": "^2.38.4",
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "ethers": "^6.11.0",
+    "@polymarket/clob-client": "^4.0.0"
   },
   "devDependencies": {
     "typescript": "^5.2.2",
