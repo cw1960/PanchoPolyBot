@@ -21,10 +21,20 @@ export class MarketLoop {
     if (this.active) return;
     
     // CRITICAL FIX: Load existing exposure from DB to prevent Amnesia
-    const { data } = await supabase.from('market_state').select('exposure').eq('market_id', this.market.id).single();
-    if (data) {
+    // We use maybeSingle() to handle the case where the row doesn't exist yet (new market)
+    const { data, error } = await supabase
+      .from('market_state')
+      .select('exposure')
+      .eq('market_id', this.market.id)
+      .maybeSingle();
+
+    if (error) {
+       Logger.error(`[${this.market.asset}] Failed to load initial state. Defaulting to $0 exposure.`, error);
+    } else if (data) {
         this.currentExposure = data.exposure || 0;
         Logger.info(`[${this.market.asset}] Loaded persisted exposure: $${this.currentExposure}`);
+    } else {
+        Logger.info(`[${this.market.asset}] No previous state found. Starting at $0 exposure.`);
     }
 
     this.active = true;
@@ -65,6 +75,7 @@ export class MarketLoop {
          Logger.info(`[EDGE] ${this.market.asset} Delta: $${observation.delta.toFixed(2)} Conf: ${(observation.confidence * 100).toFixed(0)}%`);
          
          // CRITICAL FIX: Update local exposure with result from execution
+         // This ensures our local 'currentExposure' stays in sync with what was actually traded
          const result = await executionService.attemptTrade(this.market, observation, this.currentExposure);
          if (result.executed) {
             this.currentExposure = result.newExposure;
@@ -72,7 +83,7 @@ export class MarketLoop {
       }
 
       // 4. Write State to DB (Heartbeat)
-      // We write even if no trade happened, to update prices/delta for UI
+      // We write even if no trade happened, to update prices/delta for UI visualization
       const stateRow: MarketStateRow = {
         market_id: this.market.id,
         status: status as any,

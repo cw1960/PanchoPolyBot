@@ -69,16 +69,24 @@ export class ExecutionService {
       const newExposure = currentExposure + betSizeUSDC;
 
       // 6. UPDATE DB
-      await supabase.from('market_state').upsert({
-        market_id: market.id,
-        exposure: newExposure,
-        last_update: new Date().toISOString()
-      });
+      // CRITICAL: If this fails, we must still return { executed: true } because the money is spent.
+      // If we return false, the bot will retry the order and spend MORE money (Double Spend).
+      try {
+        await supabase.from('market_state').upsert({
+          market_id: market.id,
+          exposure: newExposure,
+          last_update: new Date().toISOString()
+        });
+      } catch (dbErr) {
+        Logger.error(`[${contextId}] CRITICAL: Order succeeded but DB update failed! Local state desync risk.`, dbErr);
+        // We do NOT re-throw. We prioritize marking the trade as executed.
+      }
 
       // 7. RETURN UPDATED STATE (Critical for Loop Sync)
       return { executed: true, newExposure };
 
     } catch (err: any) {
+      // Order Placement Failed
       Logger.error(`[${contextId}] FAILED: ${err.message}`);
       await logEvent('ERROR', `Trade Failed: ${err.message}`);
       return { executed: false, newExposure: currentExposure };
