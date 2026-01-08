@@ -4,102 +4,89 @@ import { Logger } from '../utils/logger';
 import { riskGovernor } from '../risk/riskGovernor';
 import { polymarket } from './polymarket';
 import { supabase, logEvent } from './supabase';
+import { ENV } from '../config/env';
 
 /**
  * Execution Engine (The Hands)
- * 
- * Responsibilities:
- * 1. Decide IF a trade should occur (Gating)
- * 2. Decide WHAT to buy (Direction)
- * 3. Decide HOW MUCH (Sizing)
- * 4. Execute and Log
  */
 export class ExecutionService {
   
-  // Strict Safety Defaults
-  private static readonly CONFIDENCE_THRESHOLD = 0.90; // Only trade on 90%+ confidence
-  private static readonly MAX_ENTRY_PRICE_DEFAULT = 0.95; // Never pay more than 95c
+  private static readonly CONFIDENCE_THRESHOLD = 0.90;
+  private static readonly MAX_ENTRY_PRICE_DEFAULT = 0.95;
 
-  public async attemptTrade(market: Market, obs: MarketObservation, currentExposure: number) {
+  /**
+   * Attempts a trade.
+   * @returns { executed: boolean, newExposure: number } - Returns new exposure state to update the Loop
+   */
+  public async attemptTrade(market: Market, obs: MarketObservation, currentExposure: number): Promise<{ executed: boolean, newExposure: number }> {
     const contextId = `EXEC-${Date.now()}`;
 
-    // --- 1. GATING: CHECK CONFIDENCE ---
+    // 1. CONFIDENCE CHECK
     if (obs.confidence < ExecutionService.CONFIDENCE_THRESHOLD) {
-      // Too noisy, skip silently (or debug log if close)
-      if (obs.confidence > 0.7) {
-         Logger.info(`[${contextId}] SKIPPED: Confidence ${obs.confidence.toFixed(2)} < ${ExecutionService.CONFIDENCE_THRESHOLD}`);
-      }
-      return;
+      return { executed: false, newExposure: currentExposure };
     }
 
-    // --- 2. GATING: CHECK MARKET STATE ---
+    // 2. CONFIG CHECK
     if (!market.enabled) {
-      await logEvent('WARN', `SKIPPED: Market ${market.polymarket_market_id} is disabled in config.`);
-      return;
+      return { executed: false, newExposure: currentExposure };
     }
 
-    // --- 3. DIRECTION LOGIC ---
-    // If Delta > 0, Spot is higher than Chainlink. Chainlink will move UP. We Buy YES/UP.
-    // If Delta < 0, Spot is lower than Chainlink. Chainlink will move DOWN. We Buy NO/DOWN.
     const sideToBuy = obs.direction === 'UP' ? 'UP' : 'DOWN';
-    
-    Logger.info(`[${contextId}] ANALYZING: ${market.asset} | Spot > CL? ${obs.delta > 0} | Signal: BUY ${sideToBuy}`);
+    const betSizeUSDC = riskGovernor.calculateBetSize(); 
 
-    // --- 4. SIZING LOGIC ---
-    const betSizeUSDC = riskGovernor.calculateBetSize(); // e.g., $10
-    
-    // --- 5. RISK GOVERNOR APPROVAL ---
+    // 3. RISK APPROVAL
     const approved = await riskGovernor.requestApproval(market, betSizeUSDC, currentExposure);
     if (!approved) {
       await this.logSkip(market.polymarket_market_id, "Risk Governor Veto");
-      return;
+      return { executed: false, newExposure: currentExposure };
     }
 
-    // --- 6. PREPARE EXECUTION ---
-    // Resolve Token ID
+    // 4. PREPARE
     const tokens = await polymarket.getTokens(market.polymarket_market_id);
     if (!tokens) {
       Logger.error(`[${contextId}] FAILED: Could not resolve tokens for ${market.polymarket_market_id}`);
-      return;
+      return { executed: false, newExposure: currentExposure };
     }
     const tokenId = sideToBuy === 'UP' ? tokens.up : tokens.down;
-
-    // Price Protection
     const maxPrice = market.max_entry_price || ExecutionService.MAX_ENTRY_PRICE_DEFAULT;
+    const shares = Number((betSizeUSDC / maxPrice).toFixed(2));
 
-    // --- 7. EXECUTE (HANDS) ---
-    Logger.info(`[${contextId}] EXECUTING: BUY ${sideToBuy} $${betSizeUSDC} @ <${maxPrice}`);
-    
+    Logger.info(`[${contextId}] EXECUTING: BUY ${sideToBuy} $${betSizeUSDC} @ <${maxPrice} ${ENV.DRY_RUN ? '(DRY RUN)' : ''}`);
+
     try {
-      // Calculate shares: $10 / 0.95 = ~10.52 shares
-      const shares = Number((betSizeUSDC / maxPrice).toFixed(2));
+      let orderId = 'DRY-RUN-ID';
 
-      // Attempt Order Placement
-      const orderId = await polymarket.placeOrder(tokenId, 'BUY', maxPrice, shares);
+      // 5. EXECUTE (Real or Dry)
+      if (!ENV.DRY_RUN) {
+        orderId = await polymarket.placeOrder(tokenId, 'BUY', maxPrice, shares);
+      } else {
+        await new Promise(r => setTimeout(r, 500)); // Simulate latency
+      }
       
-      // --- 8. SUCCESS LOGGING ---
       Logger.info(`[${contextId}] SUCCESS: Order ${orderId}`);
-      
-      await logEvent('INFO', `EXEC: BUY ${sideToBuy} | $${betSizeUSDC} | Delta: ${obs.delta.toFixed(2)}`);
+      await logEvent('INFO', `EXEC: BUY ${sideToBuy} | $${betSizeUSDC} | Delta: ${obs.delta.toFixed(2)} ${ENV.DRY_RUN ? '[DRY]' : ''}`);
 
-      // Optimistic State Update (prevents double-fire in next loop tick)
+      const newExposure = currentExposure + betSizeUSDC;
+
+      // 6. UPDATE DB
       await supabase.from('market_state').upsert({
         market_id: market.id,
-        exposure: currentExposure + betSizeUSDC,
+        exposure: newExposure,
         last_update: new Date().toISOString()
       });
 
+      // 7. RETURN UPDATED STATE (Critical for Loop Sync)
+      return { executed: true, newExposure };
+
     } catch (err: any) {
-      // --- 9. FAILURE HANDLING ---
       Logger.error(`[${contextId}] FAILED: ${err.message}`);
       await logEvent('ERROR', `Trade Failed: ${err.message}`);
+      return { executed: false, newExposure: currentExposure };
     }
   }
 
   private async logSkip(marketId: string, reason: string) {
-    // We log skips to DB only if they are significant errors, otherwise just console
     Logger.warn(`[EXEC] SKIPPED ${marketId}: ${reason}`);
-    await logEvent('INFO', `Skipped: ${reason}`);
   }
 }
 

@@ -17,8 +17,16 @@ export class MarketLoop {
     this.edgeEngine = new EdgeEngine();
   }
 
-  public start() {
+  public async start() {
     if (this.active) return;
+    
+    // CRITICAL FIX: Load existing exposure from DB to prevent Amnesia
+    const { data } = await supabase.from('market_state').select('exposure').eq('market_id', this.market.id).single();
+    if (data) {
+        this.currentExposure = data.exposure || 0;
+        Logger.info(`[${this.market.asset}] Loaded persisted exposure: $${this.currentExposure}`);
+    }
+
     this.active = true;
     Logger.info(`Starting Market Loop for ${this.market.polymarket_market_id}`);
 
@@ -46,24 +54,25 @@ export class MarketLoop {
       // 1. Observe Market Edge
       const observation = await this.edgeEngine.observe(this.market);
 
-      if (!observation) {
-        return;
-      }
+      if (!observation) return;
 
       // 2. Determine UI Status based on confidence
       let status: 'WATCHING' | 'OPPORTUNITY' = 'WATCHING';
       if (observation.confidence > 0.6) status = 'OPPORTUNITY';
 
-      // 3. Log Significant Events
+      // 3. Log Significant Events & Attempt Trade
       if (status === 'OPPORTUNITY') {
          Logger.info(`[EDGE] ${this.market.asset} Delta: $${observation.delta.toFixed(2)} Conf: ${(observation.confidence * 100).toFixed(0)}%`);
          
-         // 4. ATTEMPT TRADE (The Hands)
-         // Only trade if confidence is high and we are in opportunity mode
-         await executionService.attemptTrade(this.market, observation, this.currentExposure);
+         // CRITICAL FIX: Update local exposure with result from execution
+         const result = await executionService.attemptTrade(this.market, observation, this.currentExposure);
+         if (result.executed) {
+            this.currentExposure = result.newExposure;
+         }
       }
 
-      // 5. Write State to DB
+      // 4. Write State to DB (Heartbeat)
+      // We write even if no trade happened, to update prices/delta for UI
       const stateRow: MarketStateRow = {
         market_id: this.market.id,
         status: status as any,
@@ -76,16 +85,7 @@ export class MarketLoop {
         last_update: new Date().toISOString()
       };
 
-      const { error } = await supabase
-        .from('market_state')
-        .upsert(stateRow);
-
-      if (error) {
-        Logger.error("Failed to update market_state", error);
-      } else {
-        // Sync exposure reading from DB in case other bots updated it
-        // (For now, we trust our local optimistic + simple DB read next tick)
-      }
+      await supabase.from('market_state').upsert(stateRow);
 
     } catch (err) {
       Logger.error(`Error in MarketLoop ${this.market.polymarket_market_id}`, err);
