@@ -9,14 +9,14 @@ import { supabase } from '../services/supabase';
  * Rules:
  * 1. Global Kill Switch check
  * 2. Per-Market Hard Cap
- * 3. Max Risk Per Trade check
+ * 3. Global Hard Cap (Sum of all markets)
  */
 export class RiskGovernor {
   // Step 6 Constants
   public static readonly GLOBAL_MAX_EXPOSURE = 500; // Hard limit $500 total risk across all markets
-  public static readonly MAX_PER_MARKET = 50;       // Hard limit $50 per market (Tightened from $100)
+  public static readonly MAX_PER_MARKET = 50;       // Hard limit $50 per market
   public static readonly MAX_RISK_PER_TRADE = 0.01; // 1% of Bankroll
-  public static readonly VIRTUAL_BANKROLL = 1000;   // Assumed bankroll for sizing (since we don't read wallet balance yet)
+  public static readonly VIRTUAL_BANKROLL = 1000;   // Assumed bankroll for sizing
 
   /**
    * Checks if a trade is safe to execute.
@@ -27,7 +27,6 @@ export class RiskGovernor {
   public async requestApproval(market: Market, amountUSDC: number, currentExposure: number): Promise<boolean> {
     
     // 1. Check Global Kill Switch (Live DB Check)
-    // This is the "Emergency Stop" button in the UI
     const { data: control, error } = await supabase.from('bot_control').select('desired_state').eq('id', 1).single();
     
     if (error || control?.desired_state !== 'running') {
@@ -36,20 +35,34 @@ export class RiskGovernor {
     }
 
     // 2. Check Market Hard Cap
-    // Prevent over-concentration in a single asset
     if (currentExposure + amountUSDC > RiskGovernor.MAX_PER_MARKET) {
-      Logger.warn(`[RISK] VETO: Market Cap Reached. (${currentExposure} + ${amountUSDC} > ${RiskGovernor.MAX_PER_MARKET})`);
+      Logger.warn(`[RISK] VETO: Market Cap Reached for ${market.polymarket_market_id}.`);
       return false;
     }
 
-    // 3. Check Configured Market Exposure Limit (User preference)
+    // 3. Check Configured Market Exposure Limit
     if (currentExposure + amountUSDC > market.max_exposure) {
-      Logger.warn(`[RISK] VETO: User Exposure Limit Reached. (${currentExposure} + ${amountUSDC} > ${market.max_exposure})`);
+      Logger.warn(`[RISK] VETO: User Exposure Limit Reached.`);
       return false;
     }
 
-    // 4. Check Global Exposure (In-Memory approximation or DB sum)
-    // For V1, we trust the per-market caps to aggregate safely.
+    // 4. Check Global Exposure (DB Summation)
+    // We sum up the exposure of ALL markets to ensure we never exceed the Global Hard Cap.
+    const { data: allStates, error: stateError } = await supabase.from('market_state').select('exposure');
+    
+    if (stateError || !allStates) {
+      Logger.error("[RISK] FAILED to fetch global exposure. Defaulting to REJECT.", stateError);
+      return false; // Fail safe
+    }
+
+    // Sum all active exposures from the database
+    const currentGlobalExposure = allStates.reduce((sum, row) => sum + (row.exposure || 0), 0);
+    
+    // Check if adding the new bet would breach the Global Max
+    if (currentGlobalExposure + amountUSDC > RiskGovernor.GLOBAL_MAX_EXPOSURE) {
+      Logger.warn(`[RISK] GLOBAL_CAP_REACHED: Current $${currentGlobalExposure} + Bet $${amountUSDC} > Max $${RiskGovernor.GLOBAL_MAX_EXPOSURE}`);
+      return false;
+    }
     
     return true;
   }
@@ -59,9 +72,8 @@ export class RiskGovernor {
    */
   public calculateBetSize(): number {
     const fractionalSize = RiskGovernor.VIRTUAL_BANKROLL * RiskGovernor.MAX_RISK_PER_TRADE; // $1000 * 0.01 = $10
-    const hardCap = 20; // Individual trade cap (e.g. $20)
+    const hardCap = 20; // Individual trade cap
     
-    // betSize = min(bankroll * MAX_RISK, HARD_CAP)
     return Math.min(fractionalSize, hardCap);
   }
 }
