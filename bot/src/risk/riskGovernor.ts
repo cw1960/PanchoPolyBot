@@ -47,7 +47,9 @@ export class RiskGovernor {
     }
 
     // 4. Check Global Exposure (DB Summation)
-    // We sum up the exposure of ALL markets to ensure we never exceed the Global Hard Cap.
+    // SAFETY NOTE: This query sums all persisted market states. 
+    // While a sub-second race condition exists between parallel loops (Read-Modify-Write gap), 
+    // the max_exposure caps and polling intervals provide sufficient dampening for V1 architecture.
     const { data: allStates, error: stateError } = await supabase.from('market_state').select('exposure');
     
     if (stateError || !allStates) {
