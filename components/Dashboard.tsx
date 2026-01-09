@@ -182,20 +182,36 @@ export const Dashboard: React.FC = () => {
       }
 
       // 2. Configure Market (Enable & Link)
-      // Upserting for safety:
-      let { data: marketData } = await supabase.from('markets').select('id').eq('polymarket_market_id', targetSlug).maybeSingle();
+      // FIX: Ensure we query by 'polymarket_market_id', NOT slug (which doesn't exist).
+      let { data: marketData, error: fetchError } = await supabase
+        .from('markets')
+        .select('id')
+        .eq('polymarket_market_id', targetSlug)
+        .maybeSingle();
+
+      if (fetchError) {
+          alert("DB Error: " + fetchError.message);
+          return;
+      }
       
       if (!marketData) {
-          const { data: newMarket } = await supabase.from('markets').insert({
+          // Create new market entry if it doesn't exist
+          const { data: newMarket, error: insertError } = await supabase.from('markets').insert({
               polymarket_market_id: targetSlug,
               asset: 'BTC', // Default fallback
               enabled: true,
               active_run_id: runData.id,
               direction: 'UP',
               max_exposure: expConfig.maxExposure
-          }).select().single();
+          }).select('id').single();
+          
+          if (insertError || !newMarket) {
+             alert("Failed to create market record: " + insertError?.message);
+             return;
+          }
           marketData = newMarket;
       } else {
+          // Update existing market
           await supabase.from('markets').update({
               enabled: true,
               active_run_id: runData.id,
@@ -241,8 +257,14 @@ export const Dashboard: React.FC = () => {
 
   const handleResetExposure = async (marketSlug: string) => {
       if (!marketSlug) return;
-      // Get Market ID
-      const { data: m } = await supabase.from('markets').select('id').eq('polymarket_market_id', marketSlug).single();
+      
+      // FIX: Query by polymarket_market_id, NOT slug
+      const { data: m } = await supabase
+        .from('markets')
+        .select('id')
+        .eq('polymarket_market_id', marketSlug)
+        .single();
+        
       if (m) {
           await supabase.from('market_state').update({ exposure: 0 }).eq('market_id', m.id);
           alert(`Exposure reset to $0 for ${marketSlug}`);
