@@ -14,6 +14,7 @@ export interface Market {
   max_exposure: number;
   min_price_delta: number;
   max_entry_price: number;
+  active_run_id?: string; // Optional: Link to a specific test run
 }
 
 // The "Eyes" of the bot. Written by EdgeEngine, read by UI.

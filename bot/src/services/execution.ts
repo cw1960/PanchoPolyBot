@@ -33,6 +33,7 @@ export class ExecutionService {
     
     // Base Event Payload
     const eventPayload = {
+      test_run_id: market.active_run_id, // Link to the specific dynamic test run from market config
       market_id: market.id,
       polymarket_market_id: market.polymarket_market_id,
       asset: market.asset,

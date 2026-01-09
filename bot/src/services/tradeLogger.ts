@@ -19,8 +19,8 @@ export class TradeLogger {
    * Logs a trade event (Decision) to the database.
    */
   public static async log(event: TradeEventRow) {
-    // Attach Test Run ID if we are in a managed experiment
-    if (this.testRunId) {
+    // Attach Static Env Test Run ID if dynamic one is NOT present
+    if (!event.test_run_id && this.testRunId) {
       event.test_run_id = this.testRunId;
     }
 
