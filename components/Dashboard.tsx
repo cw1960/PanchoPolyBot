@@ -1,608 +1,376 @@
 
-import React, { useState, useEffect, useRef, useReducer } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Play, Pause, Square, Save, Activity, Shield, 
-  Clock, AlertTriangle, CheckCircle, XCircle, 
-  ClipboardList, Terminal, ChevronRight, BarChart3,
-  Microscope, FastForward, History
+  Terminal, BarChart3, Microscope, FastForward, History,
+  Settings, Database, FlaskConical, Target, TrendingUp, Filter
 } from 'lucide-react';
+import { createClient } from '@supabase/supabase-js';
 
-// --- TYPES & DATA CONTRACT ---
+// --- SUPABASE CLIENT (In-Component for Demo, typically separate) ---
+const SUPABASE_URL = 'https://bnobbksmuhhnikjprems.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJub2Jia3NtdWhobmlranByZW1zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc4MTIzNjUsImV4cCI6MjA4MzM4ODM2NX0.hVIHTZ-dEaa1KDlm1X5SqolsxW87ehYQcPibLWmnCWg';
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-type Decision = "EXECUTE" | "SKIP";
+// --- TYPES ---
 
-interface BotEvent {
+interface FeeConfig {
+  id: number;
+  buy_fee_peak_pct: number;
+  buy_fee_peak_at_prob: number;
+  sell_fee_peak_pct: number;
+  sell_fee_peak_at_prob: number;
+  min_fee_pct: number;
+  shape_exponent: number;
+}
+
+interface TradeEvent {
   id: string;
-  timestamp: number;
+  created_at: string;
   market_id: string;
-  observed_direction: "UP" | "DOWN";
+  mode: 'DRY_RUN' | 'LIVE';
+  side: string;
+  stake_usd: number;
+  entry_prob: number;
   confidence: number;
-  delta: number;
-  decision: Decision;
-  skip_reason?: string;
-  trade_size: number;
-  exposure_before: number;
-  exposure_after: number;
-  cooldown_applied_ms: number;
-  // Proxy Outcomes (Simulated)
-  proxy_1m: number;
-  proxy_5m: number;
-  proxy_correct: boolean | null;
+  buy_fee_pct: number;
+  edge_after_fees_pct: number;
+  ev_after_fees_usd: number;
+  decision_reason: string;
+  status: string;
+  outcome: string;
 }
 
-interface TestConfig {
-  name: string;
-  market: string;
-  timeframe: string;
-  strategyTag: string;
-  hypothesis: string;
-}
+// --- UTILS ---
 
-interface Reflections {
-  strategy_q1: string; // High confidence performance?
-  strategy_q2: string; // Edge decay?
-  strategy_q3: string; // Directional bias?
-  strategy_q4: string; // Proposed changes?
-  system_q1: string;   // Cooldown effectiveness?
-  system_q2: string;   // Exposure logic?
-  system_q3: string;   // Duplicates?
-  system_q4: string;   // Unexpected behavior?
-}
-
-interface TestSession {
-  id: string;
-  config: TestConfig;
-  startTime: number;
-  endTime: number | null;
-  status: "IDLE" | "ACTIVE" | "PAUSED" | "ENDED" | "ARCHIVED";
-  events: BotEvent[];
-  reflections: Reflections;
-  stats: {
-    executed: number;
-    skipped: number;
-    exposureMax: number;
-    accuracy: number;
-  }
-}
-
-// --- MOCK GENERATOR ---
-
-const generateMockEvent = (
-  marketId: string, 
-  currentExposure: number, 
-  lastEventTime: number
-): BotEvent => {
-  const now = Date.now();
-  const timeDiff = now - lastEventTime;
-  
-  // Simulation Params
-  const isCooldown = timeDiff < 3000; // 3s cooldown logic
-  const confidence = Math.random();
-  const delta = Math.random() * 15;
-  const direction = Math.random() > 0.5 ? "UP" : "DOWN";
-  const tradeSize = 5;
-  const maxExposure = 50;
-
-  let decision: Decision = "SKIP";
-  let skip_reason = undefined;
-
-  // Logic Tree
-  if (isCooldown) {
-    skip_reason = "COOLDOWN_ACTIVE";
-  } else if (currentExposure + tradeSize > maxExposure) {
-    skip_reason = "MAX_EXPOSURE_LIMIT";
-  } else if (confidence < 0.6) {
-    skip_reason = "LOW_CONFIDENCE";
-  } else {
-    decision = "EXECUTE";
-  }
-
-  return {
-    id: Math.random().toString(36).substr(2, 9),
-    timestamp: now,
-    market_id: marketId,
-    observed_direction: direction,
-    confidence: parseFloat(confidence.toFixed(2)),
-    delta: parseFloat(delta.toFixed(2)),
-    decision,
-    skip_reason,
-    trade_size: decision === "EXECUTE" ? tradeSize : 0,
-    exposure_before: currentExposure,
-    exposure_after: decision === "EXECUTE" ? currentExposure + tradeSize : currentExposure,
-    cooldown_applied_ms: decision === "EXECUTE" ? 5000 : 0,
-    // Proxies
-    proxy_1m: parseFloat(((Math.random() - 0.5) * 2).toFixed(2)),
-    proxy_5m: parseFloat(((Math.random() - 0.5) * 5).toFixed(2)),
-    proxy_correct: decision === "EXECUTE" ? Math.random() > 0.4 : null // 60% win rate sim
-  };
-};
+const formatPct = (val: number) => `${(val * 100).toFixed(2)}%`;
+const formatUsd = (val: number) => `$${val.toFixed(3)}`;
 
 // --- COMPONENTS ---
 
 export const Dashboard: React.FC = () => {
-  // Global State
-  const [session, setSession] = useState<TestSession>({
-    id: 'init',
-    config: { name: '', market: 'BTC-JAN-26', timeframe: '15m', strategyTag: 'v1-momentum', hypothesis: '' },
-    startTime: 0,
-    endTime: null,
-    status: 'IDLE',
-    events: [],
-    reflections: {
-      strategy_q1: '', strategy_q2: '', strategy_q3: '', strategy_q4: '',
-      system_q1: '', system_q2: '', system_q3: '', system_q4: ''
-    },
-    stats: { executed: 0, skipped: 0, exposureMax: 0, accuracy: 0 }
-  });
+  const [activeTab, setActiveTab] = useState<'TRADES' | 'PERF' | 'FEES' | 'TEST'>('TRADES');
+  const [feeConfig, setFeeConfig] = useState<FeeConfig | null>(null);
+  const [trades, setTrades] = useState<TradeEvent[]>([]);
+  const [loading, setLoading] = useState(false);
+  
+  // Test Run State
+  const [testRunName, setTestRunName] = useState("Experiment-Alpha-1");
+  const [isTestActive, setIsTestActive] = useState(false);
 
-  const [lastEventTime, setLastEventTime] = useState(0);
-  const [savedCount, setSavedCount] = useState(0);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  // Calibration Toggle
+  const [useCalibratedConfidence, setUseCalibratedConfidence] = useState(false);
 
-  // Load saved count on mount
   useEffect(() => {
-    const history = JSON.parse(localStorage.getItem('polymarket_lab_sessions') || '[]');
-    setSavedCount(history.length);
+    fetchFeeConfig();
+    fetchTrades();
+    const interval = setInterval(fetchTrades, 5000); // Poll trades
+    return () => clearInterval(interval);
   }, []);
 
-  // --- CONTROLLER LOGIC ---
-
-  useEffect(() => {
-    let interval: any;
-    if (session.status === 'ACTIVE') {
-      interval = setInterval(() => {
-        // 1. Determine current exposure from last event
-        const currentExp = session.events.length > 0 
-          ? session.events[session.events.length - 1].exposure_after 
-          : 0;
-
-        // 2. Generate Event
-        const newEvent = generateMockEvent(session.config.market, currentExp, lastEventTime);
-        
-        // 3. Update State
-        setSession(prev => ({
-          ...prev,
-          events: [...prev.events, newEvent]
-        }));
-        
-        if (newEvent.decision === "EXECUTE") {
-          setLastEventTime(newEvent.timestamp);
-        }
-
-        // Auto-scroll
-        if (scrollRef.current) {
-          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        }
-
-      }, 2000); // 2 second tick
-    }
-    return () => clearInterval(interval);
-  }, [session.status, lastEventTime, session.events]);
-
-  const handleStart = () => {
-    if (!session.config.name || !session.config.hypothesis) {
-      alert("Please fill in Test Name and Hypothesis to begin research session.");
-      return;
-    }
-    setSession(prev => ({ ...prev, status: 'ACTIVE', startTime: Date.now(), events: [] }));
+  const fetchFeeConfig = async () => {
+    const { data } = await supabase.from('fee_config').select('*').single();
+    if (data) setFeeConfig(data);
   };
 
-  const handleStop = () => {
-    const executed = session.events.filter(e => e.decision === "EXECUTE");
-    const wins = executed.filter(e => e.proxy_correct).length;
+  const fetchTrades = async () => {
+    const { data } = await supabase
+      .from('trade_events')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(50);
+    if (data) setTrades(data);
+  };
+
+  const updateFeeConfig = async (key: keyof FeeConfig, val: number) => {
+    if (!feeConfig) return;
+    const newConfig = { ...feeConfig, [key]: val };
+    setFeeConfig(newConfig);
+    await supabase.from('fee_config').update({ [key]: val }).eq('id', 1);
+  };
+
+  // --- CALIBRATION LOGIC (Mocked for Demo) ---
+  const getCalibratedConfidence = (rawConf: number) => {
+    // Simple mock calibration: aggressive discount on high confidence
+    if (rawConf > 0.9) return rawConf * 0.85;
+    if (rawConf > 0.7) return rawConf * 0.9;
+    return rawConf;
+  };
+
+  // --- RENDERERS ---
+
+  const renderFeeCurve = () => {
+    if (!feeConfig) return null;
+    // Generate data points for SVG
+    const pointsBuy: string[] = [];
+    const pointsSell: string[] = [];
+    const width = 300;
+    const height = 100;
     
-    setSession(prev => ({ 
-      ...prev, 
-      status: 'ENDED', 
-      endTime: Date.now(),
-      stats: {
-        executed: executed.length,
-        skipped: prev.events.length - executed.length,
-        exposureMax: Math.max(...prev.events.map(e => e.exposure_after), 0),
-        accuracy: executed.length > 0 ? (wins / executed.length) * 100 : 0
-      }
-    }));
-  };
+    for (let i = 0; i <= 100; i++) {
+        const prob = i / 100;
+        const x = (i / 100) * width;
+        
+        // Parametric logic duplicated from backend for visualization
+        const calcFee = (peak: number, peakAt: number) => {
+            const dist = Math.abs(prob - peakAt);
+            const norm = Math.min(1, dist / 0.5);
+            const factor = 1 - Math.pow(norm, feeConfig.shape_exponent);
+            const fee = feeConfig.min_fee_pct + (peak - feeConfig.min_fee_pct) * factor;
+            return Math.max(feeConfig.min_fee_pct, Math.min(peak, fee));
+        };
 
-  const handleSave = () => {
-    // 1. Create Record
-    const record = {
-      ...session,
-      status: 'ARCHIVED',
-      savedAt: Date.now()
-    };
-    
-    // 2. Save to LocalStorage
-    try {
-      const history = JSON.parse(localStorage.getItem('polymarket_lab_sessions') || '[]');
-      history.push(record);
-      localStorage.setItem('polymarket_lab_sessions', JSON.stringify(history));
-      setSavedCount(history.length);
-      
-      console.log("Session saved to LocalStorage:", record);
-      
-      // 3. Clean Reset
-      setSession({
-        id: Math.random().toString(36).substr(2, 9),
-        config: { ...session.config, name: '', hypothesis: '' }, // Reset name/hypothesis, keep settings
-        startTime: 0,
-        endTime: null,
-        status: 'IDLE',
-        events: [],
-        reflections: {
-          strategy_q1: '', strategy_q2: '', strategy_q3: '', strategy_q4: '',
-          system_q1: '', system_q2: '', system_q3: '', system_q4: ''
-        },
-        stats: { executed: 0, skipped: 0, exposureMax: 0, accuracy: 0 }
-      });
-      
-      alert(`Session archived successfully. Total saved sessions: ${history.length}`);
-    } catch (e) {
-      alert("Failed to save to LocalStorage (Quota exceeded?)");
-      console.error(e);
+        const yBuy = height - (calcFee(feeConfig.buy_fee_peak_pct, feeConfig.buy_fee_peak_at_prob) * 1000); // Scale up
+        pointsBuy.push(`${x},${yBuy}`);
+
+        const ySell = height - (calcFee(feeConfig.sell_fee_peak_pct, feeConfig.sell_fee_peak_at_prob) * 1000); 
+        pointsSell.push(`${x},${ySell}`);
     }
+
+    return (
+        <div className="bg-zinc-900 border border-zinc-800 rounded p-4 mb-4">
+            <h3 className="text-xs font-bold text-zinc-500 uppercase mb-2">Fee Model Curve (Est. Fee % vs Probability)</h3>
+            <svg width="100%" height={height} className="overflow-visible">
+                <path d={`M ${pointsBuy.join(' L ')}`} fill="none" stroke="#10b981" strokeWidth="2" />
+                <path d={`M ${pointsSell.join(' L ')}`} fill="none" stroke="#f59e0b" strokeWidth="2" />
+                {/* Labels */}
+                <text x="5" y="10" fill="#10b981" fontSize="10">BUY FEE</text>
+                <text x="5" y="25" fill="#f59e0b" fontSize="10">SELL FEE</text>
+            </svg>
+            <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
+                <span>0.0 (0%)</span>
+                <span>0.5 (50%)</span>
+                <span>1.0 (100%)</span>
+            </div>
+        </div>
+    );
   };
-
-  // --- RENDER ---
-
-  const currentExposure = session.events.length > 0 ? session.events[session.events.length - 1].exposure_after : 0;
-  const cooldownRemaining = Math.max(0, 5000 - (Date.now() - lastEventTime));
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-300 font-sans p-6 selection:bg-emerald-900 selection:text-white">
       
       {/* HEADER */}
-      <div className="mb-8 border-b border-zinc-800 pb-4 flex justify-between items-end">
+      <div className="mb-6 border-b border-zinc-800 pb-4 flex justify-between items-end">
         <div>
           <h1 className="text-2xl font-mono font-bold text-white flex items-center gap-3">
             <Microscope className="text-emerald-500" />
-            POLYMARKET RESEARCH LAB <span className="text-zinc-600 text-sm px-2 py-0.5 border border-zinc-800 rounded">v1.0.0-BETA</span>
+            ARBINTEL LABS <span className="text-zinc-600 text-sm px-2 py-0.5 border border-zinc-800 rounded">v2.1 (FEE-AWARE)</span>
           </h1>
           <p className="text-zinc-500 text-sm mt-1 font-mono">
-            Scientific Trading Experiment Environment • No Real Money Execution
+            Empirical Trading Research • Fee Modeling • Edge Analysis
           </p>
         </div>
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border border-zinc-800 rounded text-xs font-mono text-zinc-500">
-             <History size={14} /> SAVED SESSIONS: {savedCount}
-          </div>
-          <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border border-zinc-800 rounded text-xs font-mono">
-            <Shield size={14} className="text-emerald-500" /> DRY_RUN: ENABLED
-          </div>
-          <div className="flex items-center gap-2 px-3 py-1 bg-zinc-900 border border-zinc-800 rounded text-xs font-mono">
-             EXECUTION: {session.status === 'ACTIVE' ? <span className="text-emerald-500 animate-pulse">LIVE</span> : <span className="text-zinc-500">OFFLINE</span>}
-          </div>
+        
+        {/* Test Window Control */}
+        <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-800 p-2 rounded">
+             <div className={`w-3 h-3 rounded-full ${isTestActive ? 'bg-emerald-500 animate-pulse' : 'bg-red-900'}`}></div>
+             <span className="text-xs font-mono font-bold">{isTestActive ? `TEST RUNNING: ${testRunName}` : "NO ACTIVE TEST"}</span>
+             {!isTestActive ? (
+                 <button onClick={() => setIsTestActive(true)} className="ml-2 bg-emerald-700 hover:bg-emerald-600 text-white text-[10px] px-2 py-1 rounded">START</button>
+             ) : (
+                 <button onClick={() => setIsTestActive(false)} className="ml-2 bg-red-700 hover:bg-red-600 text-white text-[10px] px-2 py-1 rounded">STOP</button>
+             )}
         </div>
       </div>
 
-      <div className="grid grid-cols-12 gap-6 h-[calc(100vh-140px)]">
+      {/* NAVIGATION */}
+      <div className="flex gap-4 mb-6 border-b border-zinc-800">
+          <button onClick={() => setActiveTab('TRADES')} className={`pb-2 text-sm font-bold border-b-2 transition-colors ${activeTab === 'TRADES' ? 'border-emerald-500 text-white' : 'border-transparent text-zinc-500'}`}>
+              <div className="flex items-center gap-2"><Database size={14} /> TRADES</div>
+          </button>
+          <button onClick={() => setActiveTab('PERF')} className={`pb-2 text-sm font-bold border-b-2 transition-colors ${activeTab === 'PERF' ? 'border-emerald-500 text-white' : 'border-transparent text-zinc-500'}`}>
+              <div className="flex items-center gap-2"><BarChart3 size={14} /> PERFORMANCE</div>
+          </button>
+          <button onClick={() => setActiveTab('FEES')} className={`pb-2 text-sm font-bold border-b-2 transition-colors ${activeTab === 'FEES' ? 'border-emerald-500 text-white' : 'border-transparent text-zinc-500'}`}>
+              <div className="flex items-center gap-2"><Settings size={14} /> FEE MODEL</div>
+          </button>
+          <button onClick={() => setActiveTab('TEST')} className={`pb-2 text-sm font-bold border-b-2 transition-colors ${activeTab === 'TEST' ? 'border-emerald-500 text-white' : 'border-transparent text-zinc-500'}`}>
+              <div className="flex items-center gap-2"><FlaskConical size={14} /> TEST SETUP</div>
+          </button>
+      </div>
 
-        {/* 1. LEFT PANEL: CONTROLLER & STATE */}
-        <div className="col-span-3 space-y-6 flex flex-col">
-          
-          {/* Test Window Controller */}
-          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-4 flex-none">
-            <div className="flex items-center gap-2 mb-4 text-emerald-400 font-bold font-mono text-sm uppercase">
-              <Terminal size={16} /> Experiment Setup
+      {/* CONTENT AREA */}
+      <div className="bg-black border border-zinc-800 rounded-lg min-h-[600px] p-4">
+        
+        {/* TAB: TRADES */}
+        {activeTab === 'TRADES' && (
+            <div>
+                <div className="flex justify-between items-center mb-4">
+                    <h2 className="text-sm font-bold text-white uppercase flex items-center gap-2">
+                        <History size={16} /> Decision Log
+                    </h2>
+                    <div className="flex items-center gap-2">
+                        <label className="text-[10px] text-zinc-500 flex items-center gap-1 cursor-pointer">
+                            <input type="checkbox" checked={useCalibratedConfidence} onChange={e => setUseCalibratedConfidence(e.target.checked)} className="rounded bg-zinc-800 border-zinc-700" />
+                            Use Calibrated Confidence
+                        </label>
+                        <button onClick={fetchTrades} className="text-[10px] bg-zinc-900 border border-zinc-800 px-2 py-1 rounded hover:bg-zinc-800">REFRESH</button>
+                    </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                        <thead className="bg-zinc-900/50 text-[10px] uppercase text-zinc-500 font-mono">
+                            <tr>
+                                <th className="p-3">Time</th>
+                                <th className="p-3">Market</th>
+                                <th className="p-3">Side</th>
+                                <th className="p-3">Decision</th>
+                                <th className="p-3 text-right">Entry Prob</th>
+                                <th className="p-3 text-right">Conf</th>
+                                <th className="p-3 text-right">Fee %</th>
+                                <th className="p-3 text-right text-emerald-500">Edge %</th>
+                                <th className="p-3 text-right text-blue-400">EV ($)</th>
+                            </tr>
+                        </thead>
+                        <tbody className="font-mono text-xs">
+                            {trades.map(trade => {
+                                const conf = useCalibratedConfidence ? getCalibratedConfidence(trade.confidence) : trade.confidence;
+                                // If calibrated, recalculate basic Edge proxy for display (simplified)
+                                const edgeDisplay = useCalibratedConfidence ? (trade.edge_after_fees_pct * (conf / trade.confidence)) : trade.edge_after_fees_pct;
+
+                                return (
+                                <tr key={trade.id} className="border-b border-zinc-900 hover:bg-zinc-900/20">
+                                    <td className="p-3 text-zinc-500">{new Date(trade.created_at).toLocaleTimeString()}</td>
+                                    <td className="p-3 text-zinc-300">{trade.market_id?.split('-')[0] || 'Unknown'}</td>
+                                    <td className={`p-3 font-bold ${trade.side === 'UP' ? 'text-emerald-400' : 'text-red-400'}`}>{trade.side}</td>
+                                    <td className="p-3">
+                                        <span className={`px-2 py-0.5 rounded text-[10px] ${trade.status === 'EXECUTED' ? 'bg-emerald-950 text-emerald-400' : 'bg-zinc-900 text-zinc-500'}`}>
+                                            {trade.decision_reason || trade.status}
+                                        </span>
+                                    </td>
+                                    <td className="p-3 text-right">{trade.entry_prob?.toFixed(2)}</td>
+                                    <td className="p-3 text-right">{(conf * 100).toFixed(0)}%</td>
+                                    <td className="p-3 text-right text-zinc-500">{formatPct(trade.buy_fee_pct)}</td>
+                                    <td className={`p-3 text-right font-bold ${edgeDisplay > 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                                        {formatPct(edgeDisplay / 100)}
+                                    </td>
+                                    <td className="p-3 text-right text-blue-400">{formatUsd(trade.ev_after_fees_usd)}</td>
+                                </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
             </div>
-            
-            <div className="space-y-3">
-              <div>
-                <label className="text-[10px] uppercase text-zinc-500 font-bold">Experiment Name</label>
-                <input 
-                  disabled={session.status !== 'IDLE'}
-                  value={session.config.name}
-                  onChange={e => setSession(prev => ({...prev, config: {...prev.config, name: e.target.value}}))}
-                  className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-white focus:border-emerald-500 outline-none disabled:opacity-50"
-                  placeholder="e.g. Momentum-V3-BTC"
-                />
-              </div>
-              
-              <div className="grid grid-cols-2 gap-2">
+        )}
+
+        {/* TAB: FEE MODEL */}
+        {activeTab === 'FEES' && feeConfig && (
+            <div className="grid grid-cols-2 gap-8">
                 <div>
-                  <label className="text-[10px] uppercase text-zinc-500 font-bold">Market</label>
-                  <select 
-                    disabled={session.status !== 'IDLE'}
-                    className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-white outline-none disabled:opacity-50"
-                    value={session.config.market}
-                    onChange={e => setSession(prev => ({...prev, config: {...prev.config, market: e.target.value}}))}
-                  >
-                    <option>BTC-JAN-26</option>
-                    <option>ETH-DEC-31</option>
-                    <option>SOL-FUTURES</option>
-                  </select>
+                    <h2 className="text-sm font-bold text-white uppercase mb-4 flex items-center gap-2">
+                        <Settings size={16} /> Fee Configuration
+                    </h2>
+                    
+                    <div className="space-y-4 bg-zinc-900/50 p-4 rounded border border-zinc-800">
+                        {/* BUY FEES */}
+                        <div className="space-y-2">
+                            <label className="text-[10px] uppercase font-bold text-emerald-500">Buy Fee Peak %</label>
+                            <input type="range" min="0" max="0.10" step="0.001" 
+                                   value={feeConfig.buy_fee_peak_pct} 
+                                   onChange={e => updateFeeConfig('buy_fee_peak_pct', parseFloat(e.target.value))}
+                                   className="w-full accent-emerald-500" />
+                            <div className="text-right text-xs font-mono">{formatPct(feeConfig.buy_fee_peak_pct)}</div>
+                        </div>
+
+                        <div className="space-y-2">
+                            <label className="text-[10px] uppercase font-bold text-emerald-500">Buy Fee Peak Probability</label>
+                            <input type="range" min="0" max="1" step="0.05" 
+                                   value={feeConfig.buy_fee_peak_at_prob} 
+                                   onChange={e => updateFeeConfig('buy_fee_peak_at_prob', parseFloat(e.target.value))}
+                                   className="w-full accent-emerald-500" />
+                            <div className="text-right text-xs font-mono">{feeConfig.buy_fee_peak_at_prob}</div>
+                        </div>
+
+                        <hr className="border-zinc-800" />
+
+                        {/* SELL FEES */}
+                        <div className="space-y-2">
+                            <label className="text-[10px] uppercase font-bold text-yellow-500">Sell Fee Peak %</label>
+                            <input type="range" min="0" max="0.10" step="0.001" 
+                                   value={feeConfig.sell_fee_peak_pct} 
+                                   onChange={e => updateFeeConfig('sell_fee_peak_pct', parseFloat(e.target.value))}
+                                   className="w-full accent-yellow-500" />
+                            <div className="text-right text-xs font-mono">{formatPct(feeConfig.sell_fee_peak_pct)}</div>
+                        </div>
+
+                        <div className="space-y-2">
+                            <label className="text-[10px] uppercase font-bold text-yellow-500">Sell Fee Peak Probability</label>
+                            <input type="range" min="0" max="1" step="0.05" 
+                                   value={feeConfig.sell_fee_peak_at_prob} 
+                                   onChange={e => updateFeeConfig('sell_fee_peak_at_prob', parseFloat(e.target.value))}
+                                   className="w-full accent-yellow-500" />
+                            <div className="text-right text-xs font-mono">{feeConfig.sell_fee_peak_at_prob}</div>
+                        </div>
+
+                        <hr className="border-zinc-800" />
+                        
+                         <div className="space-y-2">
+                            <label className="text-[10px] uppercase font-bold text-zinc-500">Shape Exponent (Curve Sharpness)</label>
+                            <input type="number" step="0.1" 
+                                   value={feeConfig.shape_exponent} 
+                                   onChange={e => updateFeeConfig('shape_exponent', parseFloat(e.target.value))}
+                                   className="w-full bg-black border border-zinc-700 p-1 text-xs text-white" />
+                        </div>
+                    </div>
                 </div>
+
                 <div>
-                  <label className="text-[10px] uppercase text-zinc-500 font-bold">Timeframe</label>
-                  <select 
-                    disabled={session.status !== 'IDLE'}
-                    className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-white outline-none disabled:opacity-50"
-                  >
-                    <option>1m</option>
-                    <option>5m</option>
-                    <option>15m</option>
-                  </select>
+                    <h2 className="text-sm font-bold text-white uppercase mb-4 flex items-center gap-2">
+                        <TrendingUp size={16} /> Visualization
+                    </h2>
+                    {renderFeeCurve()}
+
+                    <div className="bg-blue-900/20 border border-blue-900/50 p-4 rounded mt-4">
+                        <h4 className="text-blue-400 font-bold text-xs uppercase mb-2 flex items-center gap-2">
+                             <Target size={14} /> EV Logic Explanation
+                        </h4>
+                        <p className="text-[10px] text-blue-200/70 leading-relaxed">
+                            <strong>Edge After Fees</strong> is calculated as:<br/>
+                            <code>EV / Cost_Paid</code><br/><br/>
+                            Where:<br/>
+                            1. <strong>Cost_Paid</strong> = Stake ($)<br/>
+                            2. <strong>Stake_Net</strong> = Stake * (1 - Buy_Fee)<br/>
+                            3. <strong>Return_Win_Net</strong> = (Stake_Net / Entry_Price) * 1.0 * (1 - Sell_Fee)<br/>
+                            4. <strong>EV</strong> = (Confidence * Return_Win_Net) - Cost_Paid
+                        </p>
+                    </div>
                 </div>
-              </div>
-
-              <div>
-                <label className="text-[10px] uppercase text-zinc-500 font-bold">Hypothesis</label>
-                <textarea 
-                  disabled={session.status !== 'IDLE'}
-                  value={session.config.hypothesis}
-                  onChange={e => setSession(prev => ({...prev, config: {...prev.config, hypothesis: e.target.value}}))}
-                  className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-white h-20 resize-none focus:border-emerald-500 outline-none disabled:opacity-50"
-                  placeholder="I expect high-confidence signals (>80%) to have a 65% win rate in 5m window..."
-                />
-              </div>
-
-              {/* CONTROLS */}
-              <div className="pt-2 grid grid-cols-2 gap-2">
-                {session.status === 'IDLE' && (
-                  <button onClick={handleStart} className="col-span-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded flex items-center justify-center gap-2 transition-all">
-                    <Play size={18} fill="currentColor" /> START TEST
-                  </button>
-                )}
-                
-                {session.status === 'ACTIVE' && (
-                  <>
-                    <button onClick={() => setSession(prev => ({...prev, status: 'PAUSED'}))} className="bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-3 rounded flex items-center justify-center gap-2">
-                      <Pause size={18} fill="currentColor" /> PAUSE
-                    </button>
-                    <button onClick={handleStop} className="bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded flex items-center justify-center gap-2">
-                      <Square size={18} fill="currentColor" /> END SESSION
-                    </button>
-                  </>
-                )}
-
-                {session.status === 'PAUSED' && (
-                  <button onClick={() => setSession(prev => ({...prev, status: 'ACTIVE'}))} className="col-span-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded flex items-center justify-center gap-2">
-                    <Play size={18} fill="currentColor" /> RESUME
-                  </button>
-                )}
-
-                {(session.status === 'ENDED' || session.status === 'ARCHIVED') && (
-                  <div className="col-span-2 bg-zinc-800 text-zinc-500 font-bold py-3 rounded flex items-center justify-center gap-2 cursor-not-allowed">
-                     SESSION LOCKED
-                  </div>
-                )}
-              </div>
             </div>
-          </div>
+        )}
 
-          {/* Live System State */}
-          <div className="bg-black border border-zinc-800 rounded-lg p-4 flex-none space-y-4">
-             <div className="flex items-center gap-2 text-zinc-400 font-bold font-mono text-sm uppercase border-b border-zinc-900 pb-2">
-               <Activity size={16} /> System Vitality
+        {/* TAB: PERF */}
+        {activeTab === 'PERF' && (
+             <div className="flex flex-col items-center justify-center h-full text-zinc-500 py-12">
+                 <BarChart3 size={48} className="opacity-50 mb-4" />
+                 <p>Performance Aggregation requires 24h+ of Trade Data.</p>
+                 <p className="text-xs mt-2">Current Trade Count: {trades.length}</p>
              </div>
+        )}
 
-             <div className="grid grid-cols-2 gap-4">
-               <div>
-                 <span className="text-[10px] uppercase text-zinc-600 font-bold block">Current Exposure</span>
-                 <span className={`text-xl font-mono font-bold ${currentExposure > 40 ? 'text-red-500' : 'text-white'}`}>
-                   ${currentExposure}
-                 </span>
-                 <span className="text-[10px] text-zinc-600 block">Max: $50.00</span>
-               </div>
-               <div>
-                 <span className="text-[10px] uppercase text-zinc-600 font-bold block">Cooldown</span>
-                 <span className={`text-xl font-mono font-bold ${cooldownRemaining > 0 ? 'text-yellow-500' : 'text-emerald-500'}`}>
-                   {cooldownRemaining > 0 ? (cooldownRemaining/1000).toFixed(1) + 's' : 'READY'}
-                 </span>
-               </div>
-             </div>
-
-             <div>
-               <span className="text-[10px] uppercase text-zinc-600 font-bold block mb-1">Exposure Utilization</span>
-               <div className="w-full bg-zinc-900 rounded-full h-2 overflow-hidden">
-                 <div 
-                    className={`h-full transition-all duration-500 ${currentExposure > 45 ? 'bg-red-500' : 'bg-emerald-500'}`} 
-                    style={{ width: `${(currentExposure / 50) * 100}%` }}
-                 ></div>
-               </div>
-             </div>
-          </div>
-
-          {/* Session Stats (Live) */}
-          <div className="bg-zinc-900/30 border border-zinc-800/50 rounded-lg p-4 flex-1">
-             <div className="flex items-center gap-2 text-zinc-500 font-bold font-mono text-sm uppercase mb-3">
-               <BarChart3 size={16} /> Live Metrics
-             </div>
-             <div className="space-y-2 font-mono text-xs">
-               <div className="flex justify-between">
-                 <span className="text-zinc-500">Events Processed</span>
-                 <span className="text-white">{session.events.length}</span>
-               </div>
-               <div className="flex justify-between">
-                 <span className="text-zinc-500">Executed Trades</span>
-                 <span className="text-emerald-400">{session.events.filter(e => e.decision === 'EXECUTE').length}</span>
-               </div>
-               <div className="flex justify-between">
-                 <span className="text-zinc-500">Skipped (Risk/Conf)</span>
-                 <span className="text-yellow-500">{session.events.filter(e => e.decision === 'SKIP').length}</span>
-               </div>
-             </div>
-          </div>
-        </div>
-
-        {/* 2. CENTER PANEL: DECISION STREAM */}
-        <div className="col-span-6 bg-black border border-zinc-800 rounded-lg flex flex-col overflow-hidden">
-          <div className="bg-zinc-900/80 p-3 border-b border-zinc-800 flex justify-between items-center backdrop-blur">
-            <h2 className="font-mono text-sm font-bold text-white flex items-center gap-2">
-              <FastForward size={16} className="text-blue-500" /> DECISION STREAM
-            </h2>
-            <div className="flex gap-4 text-[10px] font-mono uppercase text-zinc-500">
-               <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-emerald-500/20 border border-emerald-500"></div> Executed</span>
-               <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-yellow-500/20 border border-yellow-500"></div> Skipped</span>
-               <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-red-500/20 border border-red-500"></div> Blocked</span>
-            </div>
-          </div>
-
-          {/* STREAM TABLE */}
-          <div className="flex-1 overflow-y-auto p-0" ref={scrollRef}>
-             {session.events.length === 0 ? (
-               <div className="h-full flex flex-col items-center justify-center text-zinc-700 space-y-4">
-                 <Activity size={48} className="opacity-20" />
-                 <p className="font-mono text-xs">WAITING FOR DATA STREAM...</p>
-               </div>
-             ) : (
-               <table className="w-full text-left border-collapse">
-                 <thead className="bg-zinc-900/50 sticky top-0 z-10 backdrop-blur-sm">
-                   <tr>
-                     <th className="p-2 text-[10px] uppercase text-zinc-500 font-mono">Time</th>
-                     <th className="p-2 text-[10px] uppercase text-zinc-500 font-mono">Dir</th>
-                     <th className="p-2 text-[10px] uppercase text-zinc-500 font-mono">Conf</th>
-                     <th className="p-2 text-[10px] uppercase text-zinc-500 font-mono">Delta</th>
-                     <th className="p-2 text-[10px] uppercase text-zinc-500 font-mono">Decision</th>
-                     <th className="p-2 text-[10px] uppercase text-zinc-500 font-mono">Reason</th>
-                     <th className="p-2 text-[10px] uppercase text-zinc-500 font-mono">Exp</th>
-                   </tr>
-                 </thead>
-                 <tbody className="font-mono text-xs">
-                   {session.events.map((e) => {
-                     // Row Styling
-                     let bgClass = "bg-transparent hover:bg-zinc-900/30";
-                     let textClass = "text-zinc-400";
-                     
-                     if (e.decision === "EXECUTE") {
-                       bgClass = "bg-emerald-950/10 hover:bg-emerald-900/20 border-l-2 border-emerald-500";
-                       textClass = "text-emerald-100";
-                     } else if (e.skip_reason === "LOW_CONFIDENCE") {
-                       bgClass = "bg-yellow-950/5 hover:bg-yellow-900/10 border-l-2 border-yellow-600/30";
-                       textClass = "text-yellow-100/70";
-                     } else {
-                       bgClass = "bg-red-950/5 hover:bg-red-900/10 border-l-2 border-red-900/50";
-                       textClass = "text-red-100/60";
-                     }
-
-                     return (
-                       <tr key={e.id} className={`border-b border-zinc-800/50 transition-colors ${bgClass}`}>
-                         <td className="p-2 text-zinc-500">{new Date(e.timestamp).toLocaleTimeString().split(' ')[0]}</td>
-                         <td className="p-2 font-bold">{e.observed_direction}</td>
-                         <td className="p-2">{(e.confidence * 100).toFixed(0)}%</td>
-                         <td className="p-2">${e.delta.toFixed(2)}</td>
-                         <td className="p-2 font-bold">{e.decision}</td>
-                         <td className="p-2 text-[10px] uppercase tracking-wide opacity-80">{e.skip_reason || '-'}</td>
-                         <td className="p-2 text-zinc-500">${e.exposure_after}</td>
-                       </tr>
-                     );
-                   })}
-                 </tbody>
-               </table>
-             )}
-          </div>
-        </div>
-
-        {/* 3. RIGHT PANEL: SUMMARY & REFLECTION */}
-        <div className="col-span-3 space-y-6 flex flex-col h-full overflow-hidden">
-          
-          {/* Post-Test Summary */}
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 flex-none">
-            <div className="flex items-center gap-2 mb-4 text-zinc-300 font-bold font-mono text-sm uppercase">
-               <ClipboardList size={16} className="text-purple-500" /> Session Summary
-            </div>
-            
-            {session.status === 'ENDED' || session.status === 'ARCHIVED' ? (
-              <div className="space-y-4">
-                 <div className="grid grid-cols-2 gap-2 text-center">
-                    <div className="bg-zinc-950 p-2 rounded border border-zinc-800">
-                      <div className="text-[10px] text-zinc-500 uppercase">Exec Rate</div>
-                      <div className="text-lg font-mono font-bold text-white">
-                        {session.stats.executed > 0 ? ((session.stats.executed / session.events.length) * 100).toFixed(1) : 0}%
-                      </div>
+        {/* TAB: TEST SETUP */}
+        {activeTab === 'TEST' && (
+            <div className="max-w-xl mx-auto">
+                 <h2 className="text-sm font-bold text-white uppercase mb-4 flex items-center gap-2">
+                        <FlaskConical size={16} /> Configure Experiment
+                </h2>
+                <div className="space-y-4 bg-zinc-900/50 p-6 rounded border border-zinc-800">
+                    <div>
+                        <label className="text-xs font-bold text-zinc-400 block mb-1">Experiment Name</label>
+                        <input value={testRunName} onChange={e => setTestRunName(e.target.value)} className="w-full bg-black border border-zinc-700 p-2 text-sm text-white rounded" />
                     </div>
-                    <div className="bg-zinc-950 p-2 rounded border border-zinc-800">
-                      <div className="text-[10px] text-zinc-500 uppercase">Sim Accuracy</div>
-                      <div className="text-lg font-mono font-bold text-emerald-400">
-                        {session.stats.accuracy.toFixed(1)}%
-                      </div>
+                    <div>
+                        <label className="text-xs font-bold text-zinc-400 block mb-1">Hypothesis</label>
+                        <textarea className="w-full bg-black border border-zinc-700 p-2 text-sm text-white rounded h-20" placeholder="e.g. Higher fee approximation will reduce false positives in 60-70% confidence range."></textarea>
                     </div>
-                 </div>
-                 
-                 <div className="text-xs text-zinc-500 space-y-1 p-2 bg-zinc-950/50 rounded">
-                   <div className="flex justify-between">
-                     <span>Max Exposure Used:</span>
-                     <span className={session.stats.exposureMax > 40 ? "text-red-400" : "text-zinc-300"}>${session.stats.exposureMax}</span>
-                   </div>
-                   <div className="flex justify-between">
-                     <span>Total Skipped:</span>
-                     <span>{session.stats.skipped}</span>
-                   </div>
-                 </div>
-              </div>
-            ) : (
-              <div className="h-32 flex items-center justify-center text-zinc-600 text-xs italic border-2 border-dashed border-zinc-800 rounded">
-                Available after session ends
-              </div>
-            )}
-          </div>
-
-          {/* Reflection Form */}
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 flex-1 flex flex-col overflow-hidden">
-             <div className="flex items-center justify-between mb-4 border-b border-zinc-800 pb-2">
-                <div className="flex items-center gap-2 text-zinc-300 font-bold font-mono text-sm uppercase">
-                  <CheckCircle size={16} className="text-blue-500" /> Reflections
+                    <button className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded">
+                        CREATE NEW TEST RUN
+                    </button>
                 </div>
-                {session.status === 'ENDED' && (
-                  <button onClick={handleSave} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold px-3 py-1.5 rounded transition-colors">
-                    <Save size={12} /> SAVE REPORT
-                  </button>
-                )}
-             </div>
+            </div>
+        )}
 
-             <div className="flex-1 overflow-y-auto space-y-6 pr-2">
-                {(session.status === 'ENDED' || session.status === 'ARCHIVED') ? (
-                  <>
-                    <div className="space-y-3">
-                      <h4 className="text-xs font-bold text-emerald-500 uppercase">Strategy Performance</h4>
-                      <div>
-                        <label className="text-[10px] text-zinc-500 block mb-1">Did high-confidence trades outperform?</label>
-                        <textarea 
-                          value={session.reflections.strategy_q1}
-                          onChange={e => setSession(prev => ({...prev, reflections: {...prev.reflections, strategy_q1: e.target.value}}))}
-                          className="w-full bg-black border border-zinc-800 rounded p-2 text-xs text-white h-16 resize-none focus:border-blue-500 outline-none" 
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-zinc-500 block mb-1">Observed Edge Decay / Latency?</label>
-                        <textarea 
-                          value={session.reflections.strategy_q2}
-                          onChange={e => setSession(prev => ({...prev, reflections: {...prev.reflections, strategy_q2: e.target.value}}))}
-                          className="w-full bg-black border border-zinc-800 rounded p-2 text-xs text-white h-16 resize-none focus:border-blue-500 outline-none" 
-                        />
-                      </div>
-                    </div>
-
-                    <div className="space-y-3 pt-4 border-t border-zinc-800">
-                      <h4 className="text-xs font-bold text-blue-500 uppercase">System Integrity</h4>
-                      <div>
-                        <label className="text-[10px] text-zinc-500 block mb-1">Cooldown Effectiveness?</label>
-                        <textarea 
-                          value={session.reflections.system_q1}
-                          onChange={e => setSession(prev => ({...prev, reflections: {...prev.reflections, system_q1: e.target.value}}))}
-                          className="w-full bg-black border border-zinc-800 rounded p-2 text-xs text-white h-16 resize-none focus:border-blue-500 outline-none" 
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-zinc-500 block mb-1">Exposure Logic Issues?</label>
-                        <textarea 
-                          value={session.reflections.system_q2}
-                          onChange={e => setSession(prev => ({...prev, reflections: {...prev.reflections, system_q2: e.target.value}}))}
-                          className="w-full bg-black border border-zinc-800 rounded p-2 text-xs text-white h-16 resize-none focus:border-blue-500 outline-none" 
-                        />
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-zinc-700 space-y-2 opacity-50">
-                    <ClipboardList size={32} />
-                    <p className="text-xs text-center px-4">Complete the active session to unlock the reflection journal.</p>
-                  </div>
-                )}
-             </div>
-          </div>
-
-        </div>
       </div>
     </div>
   );
