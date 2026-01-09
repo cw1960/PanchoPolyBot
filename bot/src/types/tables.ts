@@ -1,3 +1,4 @@
+
 export interface BotControl {
   id: number;
   desired_state: 'running' | 'stopped';
@@ -28,8 +29,29 @@ export interface MarketStateRow {
   last_update: string;
 }
 
-export interface BotEvent {
-  level: 'INFO' | 'WARN' | 'ERROR';
-  message: string;
-  meta?: any;
+export interface TestRun {
+  id: string;
+  name: string;
+  status: 'PLANNED' | 'RUNNING' | 'COMPLETED';
+  params: any;
+}
+
+export interface TradeEventRow {
+  test_run_id?: string;
+  market_id: string;
+  polymarket_market_id: string;
+  asset: string;
+  side: string;
+  stake_usd: number;
+  entry_prob: number;
+  confidence: number;
+  decision_reason: string;
+  status: string;
+  outcome?: string;
+  edge_after_fees_pct?: number;
+  ev_after_fees_usd?: number;
+  fees?: any;
+  context?: any;
+  signals?: any;
+  error?: string;
 }
