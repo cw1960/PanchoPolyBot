@@ -5,7 +5,7 @@ import { riskGovernor } from '../risk/riskGovernor';
 import { polymarket } from './polymarket';
 import { ENV } from '../config/env';
 import { feeModel } from './feeModel';
-import { TradeLogger } from './tradeLogger';
+import { supabase } from './supabase';
 
 /**
  * Execution Engine (The Hands)
@@ -64,28 +64,26 @@ export class ExecutionService {
     // 2. DIRECTION CHECK
     const sideToBuy = obs.direction === 'UP' ? 'UP' : 'DOWN';
     if (directionMode !== 'BOTH' && directionMode !== sideToBuy) {
-        // Silently skip if strictly filtered, or log info
-        // Not an error, just filtering.
+        // Silently skip filter
         return { executed: false, newExposure: currentExposure };
     }
 
     // 3. CONFIDENCE CHECK
     if (obs.confidence < confidenceThreshold) {
-      TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'CONFIDENCE_TOO_LOW' });
+      this.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'CONFIDENCE_TOO_LOW', dry_run: ENV.DRY_RUN });
       return { executed: false, newExposure: currentExposure };
     }
 
     // 4. EXPERIMENT EXPOSURE CHECK
-    // We strictly enforce the Experiment's Max Exposure here
     if (currentExposure + betSizeUSDC > maxExposure) {
-      TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'EXP_MAX_EXPOSURE' });
+      this.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'EXP_MAX_EXPOSURE', dry_run: ENV.DRY_RUN });
       return { executed: false, newExposure: currentExposure };
     }
 
-    // 5. GLOBAL RISK APPROVAL (Optional safety net, can be loose for experiments)
+    // 5. GLOBAL RISK APPROVAL
     const approved = await riskGovernor.requestApproval(market, betSizeUSDC, currentExposure);
     if (!approved) {
-      TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'RISK_VETO' });
+      this.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'RISK_VETO', dry_run: ENV.DRY_RUN });
       return { executed: false, newExposure: currentExposure };
     }
 
@@ -93,7 +91,7 @@ export class ExecutionService {
     const tokens = await polymarket.getTokens(market.polymarket_market_id);
     if (!tokens) {
       Logger.error(`[${contextId}] FAILED: Could not resolve tokens for ${market.polymarket_market_id}`);
-      TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'TOKEN_RESOLVE_FAIL', error: 'Tokens not found in cache/API' });
+      this.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'TOKEN_RESOLVE_FAIL', error: 'Tokens not found', dry_run: ENV.DRY_RUN });
       return { executed: false, newExposure: currentExposure };
     }
     const tokenId = sideToBuy === 'UP' ? tokens.up : tokens.down;
@@ -113,12 +111,13 @@ export class ExecutionService {
       
       Logger.info(`[${contextId}] SUCCESS: Order ${orderId}`);
       
-      // 8. LOG SUCCESS
-      TradeLogger.log({ 
+      // 8. LOG SUCCESS (PERSIST TO DB)
+      this.log({ 
         ...eventPayload, 
         status: 'EXECUTED', 
         decision_reason: 'EXECUTED',
-        context: { orderId, shares }
+        context: { orderId, shares },
+        dry_run: ENV.DRY_RUN
       });
 
       // Update Exposure (Optimistic)
@@ -126,14 +125,28 @@ export class ExecutionService {
 
     } catch (err: any) {
       Logger.error(`[${contextId}] FAILED: ${err.message}`);
-      TradeLogger.log({ 
+      this.log({ 
           ...eventPayload, 
           status: 'SKIPPED', 
           decision_reason: 'EXECUTION_ERROR', 
-          error: err.message 
+          error: err.message,
+          dry_run: ENV.DRY_RUN
       });
       return { executed: false, newExposure: currentExposure };
     }
+  }
+
+  /**
+   * Private helper to log directly to Supabase trade_events.
+   * Fire-and-forget to avoid blocking the tick loop.
+   */
+  private log(data: any) {
+    Promise.resolve().then(async () => {
+        const { error } = await supabase.from('trade_events').insert(data);
+        if (error) {
+            Logger.error("Failed to insert trade log", error);
+        }
+    });
   }
 }
 
