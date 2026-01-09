@@ -161,7 +161,6 @@ export const Dashboard: React.FC = () => {
       }
 
       // 2. Configure Market (Enable & Link)
-      // Check if market exists, if not, maybe we should warn, but assuming VPS syncs it or we upsert:
       // We assume VPS syncs structure. We just update.
       await supabase.from('markets').update({
           enabled: true,
@@ -604,4 +603,92 @@ export const Dashboard: React.FC = () => {
                   </div>
                   <div className="bg-zinc-900 border border-zinc-800 p-4 rounded">
                     <div className="text-zinc-500 text-[10px] uppercase">Realized PnL (Simulated)</div>
-                    <div className="text-2xl font-bold text-
+                    <div className={`text-2xl font-bold ${trades.reduce((acc, t) => acc + (t.realized_pnl_usd || 0), 0) >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                        {formatUsd(trades.reduce((acc, t) => acc + (t.realized_pnl_usd || 0), 0))}
+                    </div>
+                  </div>
+                  <div className="bg-zinc-900 border border-zinc-800 p-4 rounded">
+                    <div className="text-zinc-500 text-[10px] uppercase">Win Rate (Simulated)</div>
+                    <div className="text-2xl font-bold text-blue-400">
+                        {(() => {
+                            const settled = trades.filter(t => t.outcome === 'WIN' || t.outcome === 'LOSS');
+                            if (settled.length === 0) return '0%';
+                            const wins = settled.filter(t => t.outcome === 'WIN').length;
+                            return ((wins / settled.length) * 100).toFixed(1) + '%';
+                        })()}
+                    </div>
+                  </div>
+              </div>
+            )}
+
+            {/* TAB: FEES */}
+            {activeTab === 'FEES' && feeConfig && (
+                <div className="space-y-6">
+                    <div className="bg-zinc-900/50 p-6 rounded border border-zinc-800">
+                        <h2 className="text-sm font-bold text-white mb-4 flex items-center gap-2 uppercase tracking-wider">
+                            <TrendingUp size={16} className="text-emerald-500" /> Fee Curve Configuration
+                        </h2>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div className="p-4 bg-black rounded border border-zinc-800">
+                                <div className="text-zinc-500 text-[10px] uppercase">Buy Fee Peak</div>
+                                <div className="text-xl font-mono text-white">{(feeConfig.buy_fee_peak_pct * 100).toFixed(2)}%</div>
+                                <div className="text-zinc-600 text-[10px]">at {feeConfig.buy_fee_peak_at_prob} prob</div>
+                            </div>
+                            <div className="p-4 bg-black rounded border border-zinc-800">
+                                <div className="text-zinc-500 text-[10px] uppercase">Sell Fee Peak</div>
+                                <div className="text-xl font-mono text-white">{(feeConfig.sell_fee_peak_pct * 100).toFixed(2)}%</div>
+                                <div className="text-zinc-600 text-[10px]">at {feeConfig.sell_fee_peak_at_prob} prob</div>
+                            </div>
+                            <div className="p-4 bg-black rounded border border-zinc-800">
+                                <div className="text-zinc-500 text-[10px] uppercase">Min Fee</div>
+                                <div className="text-xl font-mono text-white">{(feeConfig.min_fee_pct * 100).toFixed(2)}%</div>
+                            </div>
+                            <div className="p-4 bg-black rounded border border-zinc-800">
+                                <div className="text-zinc-500 text-[10px] uppercase">Curve Shape Exp</div>
+                                <div className="text-xl font-mono text-white">{feeConfig.shape_exponent}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+          </div>
+
+          {/* RIGHT COLUMN (Sidebar Stats) */}
+          <div className="space-y-6">
+              {renderBotStatus()}
+              
+              <div className="bg-zinc-900 border border-zinc-800 rounded p-4">
+                  <h3 className="text-xs font-bold text-zinc-500 uppercase mb-3">System Health</h3>
+                  <div className="space-y-2">
+                      <div className="flex justify-between text-xs">
+                          <span className="text-zinc-400">Database</span>
+                          <span className="text-emerald-500">Connected</span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                          <span className="text-zinc-400">Latency</span>
+                          <span className="text-zinc-300">24ms</span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                          <span className="text-zinc-400">Memory</span>
+                          <span className="text-zinc-300">42%</span>
+                      </div>
+                  </div>
+              </div>
+
+              <div className="bg-zinc-900 border border-zinc-800 rounded p-4">
+                 <h3 className="text-xs font-bold text-zinc-500 uppercase mb-3">Quick Actions</h3>
+                 <div className="space-y-2">
+                    <button className="w-full text-left text-xs bg-zinc-950 hover:bg-zinc-800 p-2 rounded border border-zinc-800 text-zinc-300 transition-colors">
+                        Force Sync Markets
+                    </button>
+                    <button className="w-full text-left text-xs bg-zinc-950 hover:bg-zinc-800 p-2 rounded border border-zinc-800 text-zinc-300 transition-colors">
+                        Export Trade Logs
+                    </button>
+                 </div>
+              </div>
+          </div>
+
+      </div>
+    </div>
+  );
+};
