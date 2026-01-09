@@ -2,7 +2,7 @@ import { supabase, logEvent } from '../services/supabase';
 import { MarketRegistry } from '../services/marketRegistry';
 import { Logger } from '../utils/logger';
 import { ENV } from '../config/env';
-import { BotControl, Market } from '../types/tables';
+import { BotControl, Market, TestRun } from '../types/tables';
 
 export class ControlLoop {
   private registry: MarketRegistry;
@@ -56,18 +56,40 @@ export class ControlLoop {
         }
       } else if (desiredState === 'running') {
         // 3. Fetch Active Markets
-        const { data: markets, error: marketsError } = await supabase
+        const { data: marketsData, error: marketsError } = await supabase
           .from('markets')
           .select('*')
           .eq('enabled', true);
 
-        if (marketsError) {
+        if (marketsError || !marketsData) {
           Logger.error("Failed to fetch markets", marketsError);
           return;
         }
+        
+        const markets = marketsData as Market[];
 
-        // 4. Sync Registry
-        await this.registry.sync(markets as Market[]);
+        // 4. Fetch Active Experiment Configs (Test Runs)
+        const activeRunIds = markets.map(m => m.active_run_id).filter(id => !!id);
+        
+        let runMap = new Map<string, TestRun>();
+        
+        if (activeRunIds.length > 0) {
+           const { data: runs } = await supabase.from('test_runs').select('*').in('id', activeRunIds);
+           if (runs) {
+              runs.forEach(r => runMap.set(r.id, r as TestRun));
+           }
+        }
+
+        // 5. Enrich Market Objects with Run Data
+        const enrichedMarkets = markets.map(m => {
+            if (m.active_run_id && runMap.has(m.active_run_id)) {
+                return { ...m, _run: runMap.get(m.active_run_id) };
+            }
+            return m;
+        });
+
+        // 6. Sync Registry
+        await this.registry.sync(enrichedMarkets);
       }
 
     } catch (err) {

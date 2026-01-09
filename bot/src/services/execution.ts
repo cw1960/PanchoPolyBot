@@ -1,4 +1,3 @@
-
 import { Market } from '../types/tables';
 import { MarketObservation } from '../types/marketEdge';
 import { Logger } from '../utils/logger';
@@ -13,7 +12,6 @@ import { TradeLogger } from './tradeLogger';
  */
 export class ExecutionService {
   
-  private static readonly CONFIDENCE_THRESHOLD = 0.60;
   private static readonly MAX_ENTRY_PRICE_DEFAULT = 0.95;
 
   /**
@@ -24,16 +22,21 @@ export class ExecutionService {
     const contextId = `EXEC-${Date.now()}`;
     const mode = ENV.DRY_RUN ? 'DRY_RUN' : 'LIVE';
     
-    // 1. Calculate Core Metrics
-    const betSizeUSDC = riskGovernor.calculateBetSize(); 
-    const entryProb = market.max_entry_price || ExecutionService.MAX_ENTRY_PRICE_DEFAULT;
+    // --- EXPERIMENT PARAMETERS ---
+    const run = market._run;
+    const expParams = run?.params || {};
     
-    // Fee & EV Model
+    const betSizeUSDC = expParams.tradeSize || riskGovernor.calculateBetSize(); 
+    const maxExposure = expParams.maxExposure || market.max_exposure || 50;
+    const directionMode = expParams.direction || 'BOTH';
+    const confidenceThreshold = expParams.confidenceThreshold || 0.60;
+    
+    // 1. Metrics & Payload
+    const entryProb = market.max_entry_price || ExecutionService.MAX_ENTRY_PRICE_DEFAULT;
     const metrics = feeModel.calculateMetrics(entryProb, obs.confidence, betSizeUSDC);
     
-    // Base Event Payload
     const eventPayload = {
-      test_run_id: market.active_run_id, // Link to the specific dynamic test run from market config
+      test_run_id: market.active_run_id, 
       market_id: market.id,
       polymarket_market_id: market.polymarket_market_id,
       asset: market.asset,
@@ -58,28 +61,35 @@ export class ExecutionService {
       outcome: 'OPEN'
     };
 
-    // 2. CONFIDENCE CHECK
-    if (obs.confidence < ExecutionService.CONFIDENCE_THRESHOLD) {
+    // 2. DIRECTION CHECK
+    const sideToBuy = obs.direction === 'UP' ? 'UP' : 'DOWN';
+    if (directionMode !== 'BOTH' && directionMode !== sideToBuy) {
+        // Silently skip if strictly filtered, or log info
+        // Not an error, just filtering.
+        return { executed: false, newExposure: currentExposure };
+    }
+
+    // 3. CONFIDENCE CHECK
+    if (obs.confidence < confidenceThreshold) {
       TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'CONFIDENCE_TOO_LOW' });
       return { executed: false, newExposure: currentExposure };
     }
 
-    // 3. CONFIG CHECK
-    if (!market.enabled) {
-      TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'MARKET_DISABLED' });
+    // 4. EXPERIMENT EXPOSURE CHECK
+    // We strictly enforce the Experiment's Max Exposure here
+    if (currentExposure + betSizeUSDC > maxExposure) {
+      TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'EXP_MAX_EXPOSURE' });
       return { executed: false, newExposure: currentExposure };
     }
 
-    const sideToBuy = obs.direction === 'UP' ? 'UP' : 'DOWN';
-
-    // 4. RISK APPROVAL
+    // 5. GLOBAL RISK APPROVAL (Optional safety net, can be loose for experiments)
     const approved = await riskGovernor.requestApproval(market, betSizeUSDC, currentExposure);
     if (!approved) {
       TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'RISK_VETO' });
       return { executed: false, newExposure: currentExposure };
     }
 
-    // 5. PREPARE EXECUTION
+    // 6. PREPARE EXECUTION
     const tokens = await polymarket.getTokens(market.polymarket_market_id);
     if (!tokens) {
       Logger.error(`[${contextId}] FAILED: Could not resolve tokens for ${market.polymarket_market_id}`);
@@ -94,7 +104,7 @@ export class ExecutionService {
     try {
       let orderId = 'DRY-RUN-ID';
 
-      // 6. EXECUTE (Real or Dry)
+      // 7. EXECUTE (Real or Dry)
       if (!ENV.DRY_RUN) {
         orderId = await polymarket.placeOrder(tokenId, 'BUY', entryProb, shares);
       } else {
@@ -103,7 +113,7 @@ export class ExecutionService {
       
       Logger.info(`[${contextId}] SUCCESS: Order ${orderId}`);
       
-      // 7. LOG SUCCESS
+      // 8. LOG SUCCESS
       TradeLogger.log({ 
         ...eventPayload, 
         status: 'EXECUTED', 

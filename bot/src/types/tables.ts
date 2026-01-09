@@ -5,6 +5,14 @@ export interface BotControl {
   updated_at: string;
 }
 
+export interface ExperimentParams {
+  direction?: 'UP' | 'DOWN' | 'BOTH';
+  tradeSize?: number;
+  maxExposure?: number;
+  confidenceThreshold?: number;
+  cooldown?: number;
+}
+
 export interface Market {
   id: string; // UUID
   polymarket_market_id: string;
@@ -15,6 +23,8 @@ export interface Market {
   min_price_delta: number;
   max_entry_price: number;
   active_run_id?: string; // Optional: Link to a specific test run
+  // Internal Runtime Data
+  _run?: TestRun;
 }
 
 // The "Eyes" of the bot. Written by EdgeEngine, read by UI.
@@ -34,7 +44,7 @@ export interface TestRun {
   id: string;
   name: string;
   status: 'PLANNED' | 'RUNNING' | 'COMPLETED';
-  params: any;
+  params: ExperimentParams;
 }
 
 export interface TradeEventRow {
