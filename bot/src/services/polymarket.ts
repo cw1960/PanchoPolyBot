@@ -1,3 +1,4 @@
+
 import { ethers } from 'ethers';
 import { ClobClient, Side } from '@polymarket/clob-client';
 import { ENV } from '../config/env';
@@ -38,7 +39,6 @@ class PolymarketService {
     if (this.marketCache.has(slug)) return this.marketCache.get(slug)!;
 
     try {
-      // Fetch from Gamma API
       const res = await axios.get(`https://gamma-api.polymarket.com/events?slug=${slug}`);
       if (!res.data || res.data.length === 0) return null;
 
@@ -63,22 +63,51 @@ class PolymarketService {
   }
 
   /**
+   * Fetches metadata (Start/End times) for a market slug.
+   */
+  public async getMarketMetadata(slug: string): Promise<{ startDate: string, endDate: string } | null> {
+    try {
+      const res = await axios.get(`https://gamma-api.polymarket.com/events?slug=${slug}`);
+      if (!res.data || res.data.length === 0) return null;
+      const market = res.data[0].markets[0];
+      return { startDate: market.startDate, endDate: market.endDate };
+    } catch (err) {
+      Logger.error(`Failed to fetch metadata for ${slug}`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Fetches the Best Ask price from the Order Book for Implied Probability.
+   */
+  public async getOrderBookAsk(tokenId: string): Promise<number | null> {
+    if (!this.client) return null;
+    try {
+        const orderbook = await this.client.getOrderBook(tokenId);
+        if (orderbook.asks && orderbook.asks.length > 0) {
+            return parseFloat(orderbook.asks[0].price);
+        }
+    } catch (err) {
+        // Suppress 404s/empty books
+    }
+    return null;
+  }
+
+  /**
    * Executes a Limit Order (GTC)
    */
   public async placeOrder(tokenId: string, side: 'BUY' | 'SELL', price: number, size: number) {
     if (!this.client) throw new Error("Client not initialized");
 
-    // Create Order
     const order = await this.client.createOrder({
       tokenID: tokenId,
       price: price,
       side: side === 'BUY' ? Side.BUY : Side.SELL,
       size: size,
       feeRateBps: 0,
-      nonce: Date.now() // Simple nonce
+      nonce: Date.now()
     });
 
-    // Post Order
     const response = await this.client.postOrder(order);
     return response.orderID;
   }

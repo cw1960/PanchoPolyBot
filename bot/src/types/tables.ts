@@ -25,6 +25,11 @@ export interface Market {
   active_run_id?: string; // Optional: Link to a specific test run
   // Internal Runtime Data
   _run?: TestRun;
+  
+  // New Runtime Fields for 15m Markets
+  t_open?: string;      // ISO Timestamp of market start
+  t_expiry?: string;    // ISO Timestamp of market end
+  baseline_price?: number; // The reference price at t_open
 }
 
 // The "Eyes" of the bot. Written by EdgeEngine, read by UI.

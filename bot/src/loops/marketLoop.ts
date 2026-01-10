@@ -1,3 +1,4 @@
+
 import { Market, MarketStateRow } from '../types/tables';
 import { Logger } from '../utils/logger';
 import { ENV } from '../config/env';
@@ -12,6 +13,11 @@ export class MarketLoop {
   private edgeEngine: EdgeEngine;
   private currentExposure: number = 0; // Local tracking
   private lastRunId: string | undefined = undefined;
+  
+  // STABILITY GATING
+  private stabilityCounter: number = 0;
+  private lastDirection: 'UP' | 'DOWN' | 'NEUTRAL' = 'NEUTRAL';
+  private readonly STABILITY_THRESHOLD = 3; // Must hold signal for 3 ticks
 
   constructor(market: Market) {
     this.market = market;
@@ -43,7 +49,6 @@ export class MarketLoop {
 
       if (data) {
           this.currentExposure = data.exposure || 0;
-          Logger.info(`[${this.market.asset}] Sync exposure: $${this.currentExposure}`);
       }
   }
 
@@ -61,41 +66,48 @@ export class MarketLoop {
   private async tick() {
     if (!this.active) return;
     
-    // --- EXPERIMENT CONTROL CHECK ---
     const run = this.market._run;
-    
-    // 1. If no active experiment or experiment is NOT running, just idle.
-    if (!run || run.status !== 'RUNNING') {
-        // We log sparingly to avoid spam, or update state to 'WATCHING'/IDLE
-        return; 
-    }
+    if (!run || run.status !== 'RUNNING') return; 
 
-    // 2. DETECT EXPERIMENT RESET/SWITCH
+    // DETECT EXPERIMENT RESET
     if (this.lastRunId !== run.id) {
-        Logger.info(`[EXPERIMENT] Detected New Run: ${run.name} (ID: ${run.id}). Resetting Exposure.`);
-        this.currentExposure = 0; // MEMORY RESET
+        Logger.info(`[EXPERIMENT] Detected New Run: ${run.name}. Resetting.`);
+        this.currentExposure = 0;
+        this.stabilityCounter = 0;
         this.lastRunId = run.id;
-        
-        // Ensure DB is reset too (Double safety, though Dashboard does it)
         await supabase.from('market_state').update({ exposure: 0 }).eq('market_id', this.market.id);
     }
 
     try {
-      // 3. Observe Market Edge
+      // 1. Observe
       const observation = await this.edgeEngine.observe(this.market);
 
       if (!observation) return;
 
-      // 4. Determine UI Status based on confidence
-      let status: 'WATCHING' | 'OPPORTUNITY' = 'WATCHING';
-      
-      // Use Experiment Threshold if available, else default 0.6
+      // 2. Stability Gating
+      // We only consider it a valid signal if direction matches and confidence > threshold
       const threshold = run.params?.confidenceThreshold || 0.6;
-      if (observation.confidence > threshold) status = 'OPPORTUNITY';
+      const isHighConf = observation.confidence > threshold;
+      
+      if (isHighConf && observation.direction === this.lastDirection) {
+          this.stabilityCounter++;
+      } else {
+          this.stabilityCounter = 0;
+          this.lastDirection = observation.direction;
+      }
 
-      // 5. Attempt Trade (If Opportunity)
+      // 3. Status Determination
+      let status: 'WATCHING' | 'OPPORTUNITY' | 'LOCKED' = 'WATCHING';
+      
+      if (!observation.isSafeToTrade) {
+          status = 'LOCKED'; // No Trade Zone
+      } else if (isHighConf && this.stabilityCounter >= this.STABILITY_THRESHOLD) {
+          status = 'OPPORTUNITY';
+      }
+
+      // 4. Attempt Trade (Accumulation Pacing is handled by loop frequency)
       if (status === 'OPPORTUNITY') {
-         Logger.info(`[EDGE] ${this.market.asset} Delta: $${observation.delta.toFixed(2)} Conf: ${(observation.confidence * 100).toFixed(0)}%`);
+         Logger.info(`[EDGE] ${this.market.asset} Prob: ${(observation.calculatedProbability! * 100).toFixed(1)}% Implied: ${(observation.impliedProbability! * 100).toFixed(1)}%`);
          
          const result = await executionService.attemptTrade(this.market, observation, this.currentExposure);
          if (result.executed) {
@@ -103,7 +115,7 @@ export class MarketLoop {
          }
       }
 
-      // 6. Write State to DB (Heartbeat)
+      // 5. Write State
       const stateRow: MarketStateRow = {
         market_id: this.market.id,
         status: status as any,
