@@ -4,7 +4,7 @@ import {
   Terminal, BarChart3, Microscope, FastForward, History,
   Settings, Database, FlaskConical, Target, TrendingUp, Filter,
   CheckCircle, XCircle, AlertTriangle, Plus, Clipboard, Power, RefreshCw,
-  BrainCircuit, FileText, Search, ArrowRight
+  BrainCircuit, FileText, Search, ArrowRight, Download, RefreshCcw
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -96,8 +96,8 @@ export const Dashboard: React.FC = () => {
   const [targetSlug, setTargetSlug] = useState("");
   const [expConfig, setExpConfig] = useState<ExperimentConfig>({
     direction: 'BOTH',
-    tradeSize: 10,
-    maxExposure: 50,
+    tradeSize: 5,
+    maxExposure: 100,
     confidence: 0.60,
     cooldown: 5000
   });
@@ -110,6 +110,7 @@ export const Dashboard: React.FC = () => {
   const [intelInput, setIntelInput] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [intelResult, setIntelResult] = useState<{ score: number, bias: string, keywords: string[] } | null>(null);
+  const [isSavingFees, setIsSavingFees] = useState(false);
 
 
   useEffect(() => {
@@ -182,7 +183,6 @@ export const Dashboard: React.FC = () => {
       }
 
       // 2. Configure Market (Enable & Link)
-      // FIX: Ensure we query by 'polymarket_market_id', NOT slug (which doesn't exist).
       let { data: marketData, error: fetchError } = await supabase
         .from('markets')
         .select('id')
@@ -262,7 +262,6 @@ export const Dashboard: React.FC = () => {
           return;
       }
       
-      // FIX: Query by polymarket_market_id, NOT slug
       const { data: m } = await supabase
         .from('markets')
         .select('id')
@@ -270,7 +269,6 @@ export const Dashboard: React.FC = () => {
         .single();
         
       if (m) {
-          // IMPORTANT: Update last_update so the running bot detects the change
           await supabase.from('market_state').update({ 
               exposure: 0,
               last_update: new Date().toISOString()
@@ -280,6 +278,57 @@ export const Dashboard: React.FC = () => {
       } else {
           alert("Market not found in DB.");
       }
+  };
+
+  const handleSaveFeeConfig = async () => {
+    if (!feeConfig) return;
+    setIsSavingFees(true);
+    const { error } = await supabase.from('fee_config').update({
+        buy_fee_peak_pct: feeConfig.buy_fee_peak_pct,
+        buy_fee_peak_at_prob: feeConfig.buy_fee_peak_at_prob,
+        sell_fee_peak_pct: feeConfig.sell_fee_peak_pct,
+        sell_fee_peak_at_prob: feeConfig.sell_fee_peak_at_prob,
+        min_fee_pct: feeConfig.min_fee_pct,
+        shape_exponent: feeConfig.shape_exponent
+    }).eq('id', feeConfig.id);
+    
+    setIsSavingFees(false);
+    if (error) alert("Failed to save fee config: " + error.message);
+  };
+
+  const handleForceSync = async () => {
+      // Updates the timestamp on bot_control to trigger a wake-up in the bot's loop
+      const { error } = await supabase.from('bot_control').update({ updated_at: new Date().toISOString() }).eq('id', 1);
+      if (error) alert("Failed to send sync signal");
+      else alert("Sync signal sent to bot network.");
+  };
+
+  const handleExportLogs = () => {
+    if (trades.length === 0) {
+        alert("No trades to export.");
+        return;
+    }
+    const headers = ['Time', 'Asset', 'Side', 'Status', 'Confidence', 'EV($)', 'PnL($)'];
+    const rows = trades.map(t => [
+        t.created_at, 
+        t.asset, 
+        t.side, 
+        t.status, 
+        t.confidence, 
+        t.ev_after_fees_usd, 
+        t.realized_pnl_usd
+    ]);
+    
+    const csvContent = "data:text/csv;charset=utf-8," 
+        + [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+        
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `trade_logs_${new Date().toISOString()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const simulateOutcome = async (trade: TradeEvent) => {
@@ -336,7 +385,7 @@ export const Dashboard: React.FC = () => {
       const isAlive = botHeartbeat && (new Date().getTime() - new Date(botHeartbeat.last_seen).getTime()) < 30000; // 30s timeout
       
       return (
-          <div className="bg-zinc-900 border border-zinc-800 rounded p-4 flex items-center justify-between">
+          <div className="bg-zinc-900 border border-zinc-800 rounded p-4 flex items-center justify-between shadow-lg">
               <div className="flex items-center gap-4">
                   <div className={`p-3 rounded-full ${isAlive ? 'bg-emerald-950/50' : 'bg-red-950/50'}`}>
                       <Activity className={isAlive ? "text-emerald-500 animate-pulse" : "text-red-500"} size={20} />
@@ -376,7 +425,7 @@ export const Dashboard: React.FC = () => {
     return (
       <div className="grid grid-cols-5 gap-4">
         {stats.map(stat => (
-          <div key={stat.binLow} className="bg-zinc-900 border border-zinc-800 p-4 rounded text-center">
+          <div key={stat.binLow} className="bg-zinc-900 border border-zinc-800 p-4 rounded text-center hover:border-zinc-700 transition-colors">
              <div className="text-zinc-500 text-xs font-mono mb-2">{stat.binLow.toFixed(1)} - {stat.binHigh.toFixed(1)}</div>
              <div className={`text-2xl font-bold ${stat.rate > stat.binLow ? 'text-emerald-500' : 'text-yellow-500'}`}>
                {(stat.rate * 100).toFixed(0)}%
@@ -407,7 +456,7 @@ export const Dashboard: React.FC = () => {
         <div className="flex items-center gap-2">
             <label className="text-[10px] text-zinc-500 font-bold uppercase mr-2">Context:</label>
             <select 
-              className="bg-zinc-900 border border-zinc-800 text-xs rounded p-2 text-white outline-none"
+              className="bg-zinc-900 border border-zinc-800 text-xs rounded p-2 text-white outline-none focus:border-emerald-500 transition-colors"
               value={activeTestRunId}
               onChange={e => setActiveTestRunId(e.target.value)}
             >
@@ -425,7 +474,7 @@ export const Dashboard: React.FC = () => {
             <button 
               key={tab}
               onClick={() => setActiveTab(tab as any)} 
-              className={`pb-2 text-sm font-bold border-b-2 transition-colors whitespace-nowrap px-2 flex items-center gap-2 ${activeTab === tab ? 'border-emerald-500 text-white' : 'border-transparent text-zinc-500'}`}
+              className={`pb-2 text-sm font-bold border-b-2 transition-colors whitespace-nowrap px-2 flex items-center gap-2 ${activeTab === tab ? 'border-emerald-500 text-white' : 'border-transparent text-zinc-500 hover:text-zinc-300'}`}
             >
               {tab === 'INTEL' && <BrainCircuit size={14} />}
               {tab}
@@ -436,7 +485,7 @@ export const Dashboard: React.FC = () => {
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           
           {/* LEFT COLUMN (Main Content) */}
-          <div className="lg:col-span-3 bg-black border border-zinc-800 rounded-lg min-h-[600px] p-4">
+          <div className="lg:col-span-3 bg-black border border-zinc-800 rounded-lg min-h-[600px] p-4 shadow-xl">
             
             {/* TAB: INTEL / NEWS ANALYSIS */}
             {activeTab === 'INTEL' && (
@@ -447,7 +496,7 @@ export const Dashboard: React.FC = () => {
                         <FileText size={16} className="text-emerald-500" /> Market Intelligence Parser
                     </h2>
                     <textarea 
-                        className="w-full h-40 bg-black border border-zinc-700 rounded p-4 text-sm font-mono text-zinc-300 focus:border-emerald-500 outline-none resize-none"
+                        className="w-full h-40 bg-black border border-zinc-700 rounded p-4 text-sm font-mono text-zinc-300 focus:border-emerald-500 outline-none resize-none transition-colors"
                         placeholder="Paste article text here..."
                         value={intelInput}
                         onChange={e => setIntelInput(e.target.value)}
@@ -456,7 +505,7 @@ export const Dashboard: React.FC = () => {
                         <button 
                             onClick={handleAnalyzeIntel}
                             disabled={isAnalyzing || !intelInput}
-                            className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-6 rounded text-sm flex items-center gap-2 transition-all"
+                            className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-6 rounded text-sm flex items-center gap-2 transition-all disabled:opacity-50"
                         >
                             {isAnalyzing ? <RefreshCw className="animate-spin" size={16} /> : 'RUN ANALYSIS'}
                         </button>
@@ -471,7 +520,17 @@ export const Dashboard: React.FC = () => {
                         </div>
                         <div className="bg-zinc-900 border border-zinc-800 p-4 rounded text-center">
                             <span className="text-zinc-500 text-xs uppercase mb-2">Bias</span>
-                            <div className="text-2xl font-bold">{intelResult.bias}</div>
+                            <div className={`text-2xl font-bold ${intelResult.bias === 'BULLISH' ? 'text-emerald-500' : intelResult.bias === 'BEARISH' ? 'text-red-500' : 'text-zinc-300'}`}>
+                                {intelResult.bias}
+                            </div>
+                        </div>
+                        <div className="bg-zinc-900 border border-zinc-800 p-4 rounded text-center">
+                            <span className="text-zinc-500 text-xs uppercase mb-2">Keywords</span>
+                            <div className="text-xs text-zinc-400 mt-1 flex flex-wrap gap-1 justify-center">
+                                {intelResult.keywords.map(k => (
+                                    <span key={k} className="bg-zinc-800 px-1 rounded">{k}</span>
+                                ))}
+                            </div>
                         </div>
                     </div>
                  )}
@@ -483,8 +542,8 @@ export const Dashboard: React.FC = () => {
               <div className="space-y-6">
                 
                 {/* EXPERIMENT CONTROL PLANE */}
-                <div className="bg-zinc-900/50 p-6 rounded border border-zinc-800 relative overflow-hidden">
-                    <div className="absolute top-0 right-0 p-4 opacity-10">
+                <div className="bg-zinc-900/50 p-6 rounded border border-zinc-800 relative overflow-hidden group">
+                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity duration-700">
                         <FlaskConical size={120} />
                     </div>
 
@@ -500,7 +559,7 @@ export const Dashboard: React.FC = () => {
                                 <div>
                                     <label className="text-[10px] text-zinc-500 uppercase font-bold block mb-1">Experiment Name</label>
                                     <input 
-                                        className="w-full bg-black border border-zinc-700 rounded p-2 text-sm focus:border-emerald-500 outline-none"
+                                        className="w-full bg-black border border-zinc-700 rounded p-2 text-sm focus:border-emerald-500 outline-none transition-colors"
                                         placeholder="e.g. BTC-Vol-Test-1"
                                         value={newRunName}
                                         onChange={e => setNewRunName(e.target.value)}
@@ -509,7 +568,7 @@ export const Dashboard: React.FC = () => {
                                 <div>
                                     <label className="text-[10px] text-zinc-500 uppercase font-bold block mb-1">Market Slug</label>
                                     <input 
-                                        className="w-full bg-black border border-zinc-700 rounded p-2 text-sm font-mono focus:border-emerald-500 outline-none"
+                                        className="w-full bg-black border border-zinc-700 rounded p-2 text-sm font-mono focus:border-emerald-500 outline-none transition-colors"
                                         placeholder="bitcoin-up-or-down-..."
                                         value={targetSlug}
                                         onChange={e => setTargetSlug(e.target.value)}
@@ -518,7 +577,7 @@ export const Dashboard: React.FC = () => {
                             </div>
                             <div>
                                 <input 
-                                    className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-zinc-400 focus:border-emerald-500 outline-none"
+                                    className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-zinc-400 focus:border-emerald-500 outline-none transition-colors"
                                     placeholder="Hypothesis (e.g. 'Higher confidence threshold reduces loss rate')"
                                     value={newRunHypothesis}
                                     onChange={e => setNewRunHypothesis(e.target.value)}
@@ -531,13 +590,13 @@ export const Dashboard: React.FC = () => {
                             <label className="text-[10px] text-emerald-500 uppercase font-bold block mb-2 border-b border-zinc-800 pb-1">Run Configuration</label>
                             
                             <div className="flex justify-between items-center">
-                                <span className="text-xs text-zinc-400">Direction</span>
+                                <span className="text-xs text-zinc-400 font-bold">Direction</span>
                                 <div className="flex bg-zinc-900 rounded p-0.5 border border-zinc-700">
                                     {(['UP', 'BOTH', 'DOWN'] as const).map(d => (
                                         <button 
                                             key={d}
                                             onClick={() => setExpConfig(c => ({...c, direction: d}))}
-                                            className={`text-[10px] px-2 py-0.5 rounded ${expConfig.direction === d ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
+                                            className={`text-[10px] px-2 py-0.5 rounded transition-colors ${expConfig.direction === d ? 'bg-zinc-700 text-white font-bold' : 'text-zinc-500 hover:text-zinc-300'}`}
                                         >
                                             {d}
                                         </button>
@@ -546,30 +605,36 @@ export const Dashboard: React.FC = () => {
                             </div>
 
                             <div className="flex justify-between items-center">
-                                <span className="text-xs text-zinc-400">Trade Size</span>
-                                <input 
-                                    type="number" 
-                                    className="w-16 bg-zinc-900 border border-zinc-700 rounded text-right px-2 py-0.5 text-xs text-white"
-                                    value={expConfig.tradeSize}
-                                    onChange={e => setExpConfig(c => ({...c, tradeSize: parseFloat(e.target.value)}))}
-                                />
+                                <span className="text-xs text-zinc-400 font-bold">Trade Size</span>
+                                <div className="flex items-center gap-1">
+                                    <span className="text-[10px] text-zinc-600">$</span>
+                                    <input 
+                                        type="number" 
+                                        className="w-16 bg-zinc-900 border border-zinc-700 rounded text-right px-2 py-0.5 text-xs text-white focus:border-emerald-500 outline-none"
+                                        value={expConfig.tradeSize}
+                                        onChange={e => setExpConfig(c => ({...c, tradeSize: parseFloat(e.target.value)}))}
+                                    />
+                                </div>
                             </div>
 
                             <div className="flex justify-between items-center">
-                                <span className="text-xs text-zinc-400">Max Exposure</span>
-                                <input 
-                                    type="number" 
-                                    className="w-16 bg-zinc-900 border border-zinc-700 rounded text-right px-2 py-0.5 text-xs text-white"
-                                    value={expConfig.maxExposure}
-                                    onChange={e => setExpConfig(c => ({...c, maxExposure: parseFloat(e.target.value)}))}
-                                />
+                                <span className="text-xs text-zinc-400 font-bold">Max Exposure</span>
+                                <div className="flex items-center gap-1">
+                                    <span className="text-[10px] text-zinc-600">$</span>
+                                    <input 
+                                        type="number" 
+                                        className="w-16 bg-zinc-900 border border-zinc-700 rounded text-right px-2 py-0.5 text-xs text-white focus:border-emerald-500 outline-none"
+                                        value={expConfig.maxExposure}
+                                        onChange={e => setExpConfig(c => ({...c, maxExposure: parseFloat(e.target.value)}))}
+                                    />
+                                </div>
                             </div>
 
                             <div className="flex justify-between items-center">
-                                <span className="text-xs text-zinc-400">Conf. Threshold</span>
+                                <span className="text-xs text-zinc-400 font-bold">Conf. Threshold</span>
                                 <input 
                                     type="number" step="0.05"
-                                    className="w-16 bg-zinc-900 border border-zinc-700 rounded text-right px-2 py-0.5 text-xs text-white"
+                                    className="w-16 bg-zinc-900 border border-zinc-700 rounded text-right px-2 py-0.5 text-xs text-white focus:border-emerald-500 outline-none"
                                     value={expConfig.confidence}
                                     onChange={e => setExpConfig(c => ({...c, confidence: parseFloat(e.target.value)}))}
                                 />
@@ -582,9 +647,9 @@ export const Dashboard: React.FC = () => {
                     <div className="mt-6 pt-4 border-t border-zinc-800 flex justify-end gap-3">
                          <button 
                             onClick={() => handleResetExposure(targetSlug)}
-                            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-400 px-4 py-2 rounded text-xs font-bold transition-colors"
+                            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-400 px-4 py-2 rounded text-xs font-bold transition-colors flex items-center gap-2"
                          >
-                            RESET EXPOSURE ONLY
+                            <RefreshCcw size={12} /> RESET EXPOSURE ONLY
                          </button>
                          <button 
                             onClick={handleStartTest}
@@ -607,7 +672,7 @@ export const Dashboard: React.FC = () => {
                           </div>
                           <p className="text-xs text-zinc-500 font-mono mb-2">{run.hypothesis}</p>
                           <div className="flex items-center gap-4 text-[10px] text-zinc-600 font-mono">
-                              <span>Slug: {run.params?.targetSlug || 'N/A'}</span>
+                              <span>Slug: {run.params?.targetSlug?.substring(0, 20) || 'N/A'}...</span>
                               <span>Mode: {run.params?.direction || 'BOTH'}</span>
                               <span>Max: ${run.params?.maxExposure}</span>
                           </div>
@@ -615,7 +680,7 @@ export const Dashboard: React.FC = () => {
                         
                         <div className="flex flex-col items-end gap-2">
                           {run.status === 'RUNNING' && (
-                            <button onClick={() => handleStopTest(run.id)} className="bg-red-900/30 text-red-400 hover:bg-red-900/50 border border-red-900 text-xs px-3 py-1 rounded flex items-center gap-2">
+                            <button onClick={() => handleStopTest(run.id)} className="bg-red-900/30 text-red-400 hover:bg-red-900/50 border border-red-900 text-xs px-3 py-1 rounded flex items-center gap-2 transition-colors">
                               <Square size={12} fill="currentColor" /> ABORT EXPERIMENT
                             </button>
                           )}
@@ -646,7 +711,7 @@ export const Dashboard: React.FC = () => {
                     </thead>
                     <tbody className="font-mono text-xs">
                       {trades.map(trade => (
-                        <tr key={trade.id} className="border-b border-zinc-900 hover:bg-zinc-900/30">
+                        <tr key={trade.id} className="border-b border-zinc-900 hover:bg-zinc-900/30 transition-colors">
                           <td className="p-3 text-zinc-500">{new Date(trade.created_at).toLocaleTimeString()}</td>
                           <td className="p-3 text-white font-bold">{trade.asset}</td>
                           <td className={`p-3 font-bold ${trade.side === 'UP' ? 'text-emerald-400' : 'text-red-400'}`}>{trade.side}</td>
@@ -724,10 +789,93 @@ export const Dashboard: React.FC = () => {
             {activeTab === 'FEES' && feeConfig && (
                 <div className="space-y-6">
                     <div className="bg-zinc-900/50 p-6 rounded border border-zinc-800">
-                        <h2 className="text-sm font-bold text-white mb-4 flex items-center gap-2 uppercase tracking-wider">
-                            <TrendingUp size={16} className="text-emerald-500" /> Fee Curve Configuration
-                        </h2>
-                        {/* ... Fee config unchanged ... */}
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-sm font-bold text-white flex items-center gap-2 uppercase tracking-wider">
+                                <TrendingUp size={16} className="text-emerald-500" /> Fee Curve Configuration
+                            </h2>
+                            {isSavingFees && <span className="text-xs text-emerald-500 animate-pulse">Saving...</span>}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-x-8 gap-y-6">
+                            <div className="space-y-4">
+                                <h3 className="text-xs font-bold text-zinc-500 uppercase border-b border-zinc-800 pb-2">Buy Side Config</h3>
+                                <div>
+                                    <label className="text-[10px] text-zinc-400 uppercase font-bold block mb-1">Peak Fee %</label>
+                                    <input 
+                                        type="number" step="0.001"
+                                        className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-white focus:border-emerald-500 outline-none"
+                                        value={feeConfig.buy_fee_peak_pct}
+                                        onChange={(e) => setFeeConfig({...feeConfig, buy_fee_peak_pct: parseFloat(e.target.value)})}
+                                    />
+                                    <p className="text-[10px] text-zinc-600 mt-1">Max fee at peak uncertainty (0.50)</p>
+                                </div>
+                                <div>
+                                    <label className="text-[10px] text-zinc-400 uppercase font-bold block mb-1">Peak At Prob.</label>
+                                    <input 
+                                        type="number" step="0.05"
+                                        className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-white focus:border-emerald-500 outline-none"
+                                        value={feeConfig.buy_fee_peak_at_prob}
+                                        onChange={(e) => setFeeConfig({...feeConfig, buy_fee_peak_at_prob: parseFloat(e.target.value)})}
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="space-y-4">
+                                <h3 className="text-xs font-bold text-zinc-500 uppercase border-b border-zinc-800 pb-2">Sell Side Config</h3>
+                                <div>
+                                    <label className="text-[10px] text-zinc-400 uppercase font-bold block mb-1">Peak Fee %</label>
+                                    <input 
+                                        type="number" step="0.001"
+                                        className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-white focus:border-emerald-500 outline-none"
+                                        value={feeConfig.sell_fee_peak_pct}
+                                        onChange={(e) => setFeeConfig({...feeConfig, sell_fee_peak_pct: parseFloat(e.target.value)})}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] text-zinc-400 uppercase font-bold block mb-1">Peak At Prob.</label>
+                                    <input 
+                                        type="number" step="0.05"
+                                        className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-white focus:border-emerald-500 outline-none"
+                                        value={feeConfig.sell_fee_peak_at_prob}
+                                        onChange={(e) => setFeeConfig({...feeConfig, sell_fee_peak_at_prob: parseFloat(e.target.value)})}
+                                    />
+                                </div>
+                            </div>
+                            
+                             <div className="col-span-2 space-y-4 pt-4 border-t border-zinc-800">
+                                <h3 className="text-xs font-bold text-zinc-500 uppercase border-b border-zinc-800 pb-2">Global Curve Shape</h3>
+                                <div className="grid grid-cols-2 gap-8">
+                                    <div>
+                                        <label className="text-[10px] text-zinc-400 uppercase font-bold block mb-1">Min Floor Fee %</label>
+                                        <input 
+                                            type="number" step="0.001"
+                                            className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-white focus:border-emerald-500 outline-none"
+                                            value={feeConfig.min_fee_pct}
+                                            onChange={(e) => setFeeConfig({...feeConfig, min_fee_pct: parseFloat(e.target.value)})}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="text-[10px] text-zinc-400 uppercase font-bold block mb-1">Curve Exponent</label>
+                                        <input 
+                                            type="number" step="0.1"
+                                            className="w-full bg-black border border-zinc-700 rounded p-2 text-sm text-white focus:border-emerald-500 outline-none"
+                                            value={feeConfig.shape_exponent}
+                                            onChange={(e) => setFeeConfig({...feeConfig, shape_exponent: parseFloat(e.target.value)})}
+                                        />
+                                        <p className="text-[10px] text-zinc-600 mt-1">Higher = Steeper curve (fewer fees away from peak)</p>
+                                    </div>
+                                </div>
+                             </div>
+                        </div>
+
+                        <div className="mt-8 flex justify-end">
+                            <button 
+                                onClick={handleSaveFeeConfig}
+                                className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-2 rounded text-sm font-bold flex items-center gap-2 shadow-lg transition-all"
+                            >
+                                <Save size={16} /> SAVE CONFIGURATION
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
@@ -758,11 +906,17 @@ export const Dashboard: React.FC = () => {
               <div className="bg-zinc-900 border border-zinc-800 rounded p-4">
                  <h3 className="text-xs font-bold text-zinc-500 uppercase mb-3">Quick Actions</h3>
                  <div className="space-y-2">
-                    <button className="w-full text-left text-xs bg-zinc-950 hover:bg-zinc-800 p-2 rounded border border-zinc-800 text-zinc-300 transition-colors">
-                        Force Sync Markets
+                    <button 
+                        onClick={handleForceSync}
+                        className="w-full text-left text-xs bg-zinc-950 hover:bg-zinc-800 p-2 rounded border border-zinc-800 text-zinc-300 transition-colors flex items-center gap-2"
+                    >
+                        <RefreshCcw size={12} /> Force Sync Markets
                     </button>
-                    <button className="w-full text-left text-xs bg-zinc-950 hover:bg-zinc-800 p-2 rounded border border-zinc-800 text-zinc-300 transition-colors">
-                        Export Trade Logs
+                    <button 
+                        onClick={handleExportLogs}
+                        className="w-full text-left text-xs bg-zinc-950 hover:bg-zinc-800 p-2 rounded border border-zinc-800 text-zinc-300 transition-colors flex items-center gap-2"
+                    >
+                        <Download size={12} /> Export Trade Logs
                     </button>
                  </div>
               </div>
