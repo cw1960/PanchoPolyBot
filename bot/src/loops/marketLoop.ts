@@ -16,6 +16,7 @@ export class MarketLoop {
   
   // To handle external resets
   private lastWriteTime: number = 0;
+  private lastLogTime: number = 0; // Throttle idle logs
   
   // ROLLING STATE
   private priceHistory: { price: number, time: number }[] = [];
@@ -149,6 +150,12 @@ export class MarketLoop {
       );
 
       if (!observation) {
+          // Verbose "Waiting" Log every ~10 seconds
+          const now = Date.now();
+          if (now - this.lastLogTime > 10000) {
+              Logger.info(`[LOOP] Waiting for Data/Hydration... (${this.market.polymarket_market_id})`);
+              this.lastLogTime = now;
+          }
           return;
       }
 

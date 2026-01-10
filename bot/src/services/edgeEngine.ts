@@ -1,4 +1,3 @@
-
 import { Market } from '../types/tables';
 import { ChainlinkService } from './chainlink';
 import { SpotPriceService } from './spotPrices';
@@ -35,7 +34,9 @@ export class EdgeEngine {
             if (meta) {
                 market.t_open = meta.startDate;
                 market.t_expiry = meta.endDate;
+                Logger.info(`[HYDRATE] Fetched Times | Start: ${market.t_open}`);
             } else {
+                Logger.warn(`[HYDRATE] Failed to fetch metadata for ${market.polymarket_market_id}`);
                 return false; 
             }
         }
@@ -43,6 +44,16 @@ export class EdgeEngine {
         // 2. Fetch Baseline (Nearest Trade via AggTrades)
         if (market.t_open && !market.baseline_price) {
             const startMs = new Date(market.t_open).getTime();
+            const now = Date.now();
+
+            // Wait if market hasn't started
+            if (startMs > now) {
+                const waitSec = Math.ceil((startMs - now) / 1000);
+                if (waitSec % 10 === 0) { // Log every 10s
+                     Logger.info(`[HYDRATE] Waiting for Start: ${market.t_open} (in ${waitSec}s)`);
+                }
+                return false;
+            }
             
             // Get trade at or immediately after t_open
             const trade = await this.spot.getHistoricalTrade(market.asset, startMs);
@@ -58,12 +69,13 @@ export class EdgeEngine {
                     return false; 
                 }
             } else {
+                Logger.warn(`[HYDRATE] No baseline trade found at ${market.t_open} yet.`);
                 return false;
             }
         }
         return true;
-    } catch (e) {
-        Logger.warn(`[HYDRATE] Failed to hydrate ${market.polymarket_market_id}`, e);
+    } catch (e: any) {
+        Logger.warn(`[HYDRATE] Failed to hydrate ${market.polymarket_market_id}: ${e.message}`);
         return false;
     }
   }
