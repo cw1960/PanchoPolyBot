@@ -1,3 +1,4 @@
+
 import { supabase, logEvent } from '../services/supabase';
 import { MarketRegistry } from '../services/marketRegistry';
 import { Logger } from '../utils/logger';
@@ -69,12 +70,22 @@ export class ControlLoop {
         const markets = marketsData as Market[];
 
         // 4. Fetch Active Experiment Configs (Test Runs)
-        const activeRunIds = markets.map(m => m.active_run_id).filter(id => !!id);
+        const activeRunIds = markets
+            .map(m => m.active_run_id)
+            .filter((id): id is string => !!id); // Filter nulls and ensure type safety
         
         let runMap = new Map<string, TestRun>();
         
         if (activeRunIds.length > 0) {
-           const { data: runs } = await supabase.from('test_runs').select('*').in('id', activeRunIds);
+           const { data: runs, error: runsError } = await supabase
+            .from('test_runs')
+            .select('*')
+            .in('id', activeRunIds);
+            
+           if (runsError) {
+             Logger.error("Failed to fetch test runs", runsError);
+           }
+           
            if (runs) {
               runs.forEach(r => runMap.set(r.id, r as TestRun));
            }
@@ -82,8 +93,14 @@ export class ControlLoop {
 
         // 5. Enrich Market Objects with Run Data
         const enrichedMarkets = markets.map(m => {
-            if (m.active_run_id && runMap.has(m.active_run_id)) {
-                return { ...m, _run: runMap.get(m.active_run_id) };
+            if (m.active_run_id) {
+                if (runMap.has(m.active_run_id)) {
+                    // Success: Found the run config
+                    return { ...m, _run: runMap.get(m.active_run_id) };
+                } else {
+                    // Warn: Market has run_id but run not found (deleted? error?)
+                    Logger.warn(`[CONTROL] Market ${m.asset} linked to missing Run ID: ${m.active_run_id}`);
+                }
             }
             return m;
         });

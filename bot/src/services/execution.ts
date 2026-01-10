@@ -1,3 +1,4 @@
+
 import { Market } from '../types/tables';
 import { MarketObservation } from '../types/marketEdge';
 import { Logger } from '../utils/logger';
@@ -18,7 +19,16 @@ export class ExecutionService {
     const run = market._run;
     const expParams = run?.params || {};
     
-    const betSizeUSDC = expParams.tradeSize || riskGovernor.calculateBetSize(); 
+    // PRIORITY: Experiment Param -> Risk Governor Default
+    let betSizeUSDC: number;
+    if (expParams.tradeSize && expParams.tradeSize > 0) {
+        betSizeUSDC = expParams.tradeSize;
+    } else {
+        betSizeUSDC = riskGovernor.calculateBetSize();
+        // Log this fallback so we know why it's happening
+        if (run) Logger.warn(`[${contextId}] Fallback to Default Bet Size ($${betSizeUSDC}) - 'tradeSize' missing in run params.`);
+    }
+
     const maxExposure = expParams.maxExposure || market.max_exposure || 50;
     const directionMode = expParams.direction || 'BOTH';
     const confidenceThreshold = expParams.confidenceThreshold || 0.60;
@@ -77,7 +87,7 @@ export class ExecutionService {
           ...eventPayload, 
           status: 'SKIPPED', 
           decision_reason: 'CONFIDENCE_TOO_LOW', 
-          context: { mode: mode, dry_run: ENV.DRY_RUN }
+          context: { mode, dry_run: ENV.DRY_RUN }
       });
       return { executed: false, newExposure: currentExposure };
     }
@@ -88,7 +98,7 @@ export class ExecutionService {
           ...eventPayload, 
           status: 'SKIPPED', 
           decision_reason: 'MAX_EXPOSURE_HIT', 
-          context: { mode: mode, dry_run: ENV.DRY_RUN }
+          context: { mode, dry_run: ENV.DRY_RUN }
       });
       return { executed: false, newExposure: currentExposure };
     }
@@ -100,7 +110,7 @@ export class ExecutionService {
           ...eventPayload, 
           status: 'SKIPPED', 
           decision_reason: 'RISK_VETO', 
-          context: { mode: mode, dry_run: ENV.DRY_RUN } 
+          context: { mode, dry_run: ENV.DRY_RUN } 
       });
       return { executed: false, newExposure: currentExposure };
     }
@@ -113,7 +123,7 @@ export class ExecutionService {
           status: 'SKIPPED', 
           decision_reason: 'TOKEN_RESOLVE_FAIL', 
           error: 'Tokens not found', 
-          context: { mode: mode, dry_run: ENV.DRY_RUN } 
+          context: { mode, dry_run: ENV.DRY_RUN } 
       });
       return { executed: false, newExposure: currentExposure };
     }
@@ -130,7 +140,7 @@ export class ExecutionService {
             ...eventPayload, 
             status: 'EXECUTED', 
             decision_reason: 'DRY_RUN_EXEC',
-            context: { orderId: 'DRY-RUN-ID', shares, filledPrice: entryLimitPrice, mode: mode, dry_run: true }
+            context: { orderId: 'DRY-RUN-ID', shares, filledPrice: entryLimitPrice, mode, dry_run: true }
           });
 
           // DO NOT LOG EXPOSURE CONSUME
@@ -144,7 +154,7 @@ export class ExecutionService {
         ...eventPayload, 
         status: 'EXECUTED', 
         decision_reason: 'EXECUTED',
-        context: { orderId, shares, filledPrice: entryLimitPrice, mode: mode, dry_run: false }
+        context: { orderId, shares, filledPrice: entryLimitPrice, mode, dry_run: false }
       });
       
       // LOG CRITICAL EXPOSURE CONSUMPTION
@@ -159,20 +169,26 @@ export class ExecutionService {
           status: 'SKIPPED', 
           decision_reason: 'EXECUTION_ERROR', 
           error: err.message,
-          context: { mode: mode, dry_run: ENV.DRY_RUN }
+          context: { mode, dry_run: ENV.DRY_RUN }
       });
       return { executed: false, newExposure: currentExposure };
     }
   }
 
   private log(data: any) {
-    // Sanitization: Ensure no rogue fields leak in that aren't columns
-    const { mode, ...cleanData } = data;
-
+    // Attempt to log to Supabase.
     Promise.resolve().then(async () => {
+        // Strip out 'mode' if it was accidentally passed in top-level, though we prefer it in context
+        const { mode, ...cleanData } = data;
+        
+        // Ensure context is JSON-compatible if necessary
+        // Supabase JSONB columns handle objects fine.
+        
         const { error } = await supabase.from('trade_events').insert(cleanData);
         if (error) {
-            Logger.error("DB Log Fail", error);
+            Logger.error(`DB_LOG_FAIL: ${error.message}`, error);
+            // Fallback: Try removing complex fields if they are causing issues?
+            // For now, logging the error clearly is sufficient to debug.
         }
     });
   }
