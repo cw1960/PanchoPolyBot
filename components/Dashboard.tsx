@@ -236,7 +236,7 @@ export const Dashboard: React.FC = () => {
       setNewRunHypothesis("");
       fetchTestRuns();
       fetchBotStatus();
-      alert(`Experiment "${runData.name}" Started! Budget Reset to $0 (Full Capacity).`);
+      alert(`Experiment "${runData.name}" Started! Used Budget reset to $0. (Bot has $${expConfig.maxExposure} available to spend).`);
   };
 
   const handleStopTest = async (runId: string) => {
@@ -293,7 +293,7 @@ export const Dashboard: React.FC = () => {
               last_update: new Date().toISOString()
           }).eq('market_id', m.id);
           
-          alert(`Used Budget reset to $0. Bot now has full capacity for ${marketSlug}`);
+          alert(`Used Budget reset to $0. The bot is now allowed to trade up to its Max Budget for ${marketSlug}.`);
       }
   };
 
@@ -670,7 +670,7 @@ export const Dashboard: React.FC = () => {
                     {/* Action Bar */}
                     <div className="mt-6 pt-4 border-t border-zinc-800 flex justify-end gap-3 items-center">
                          <span className="text-[10px] text-zinc-600 mr-2">
-                           Budget Used: $0 / ${expConfig.maxExposure} (After Reset)
+                           Starting Usage: $0 (Full ${expConfig.maxExposure} Available)
                          </span>
                          <button 
                             onClick={() => handleResetExposure(targetSlug)}
