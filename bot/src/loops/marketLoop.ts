@@ -41,7 +41,7 @@ export class MarketLoop {
     await this.refreshExposure();
     
     this.active = true;
-    Logger.info(`[EXPOSURE] INIT run=${this.market.active_run_id} market=${this.market.polymarket_market_id} used=${this.currentExposure}`);
+    Logger.info(`[EXPOSURE_INIT] Market: ${this.market.polymarket_market_id} | Found existing usage: $${this.currentExposure}`);
 
     this.intervalId = setInterval(() => {
       this.tick();
@@ -93,7 +93,7 @@ export class MarketLoop {
             last_update: new Date().toISOString()
         });
         
-        Logger.info(`[EXPOSURE] INIT run=${run.id} market=${this.market.polymarket_market_id} used=0`);
+        Logger.info(`[EXPOSURE_RESET] Run=${run.id} | Usage reset to $0`);
     }
 
     // 2. EXTERNAL RESET DETECTION
@@ -134,7 +134,10 @@ export class MarketLoop {
 
     // 4. Log Exposure Check
     const max = run.params?.maxExposure || this.market.max_exposure || 50;
-    Logger.info(`[EXPOSURE] CHECK run=${run.id} market=${this.market.polymarket_market_id} used=${this.currentExposure} remaining=${max - this.currentExposure}`);
+    // Removed verbose exposure log to reduce noise, unless near cap
+    if (this.currentExposure > (max * 0.8)) {
+        Logger.warn(`[EXPOSURE_WARN] Market: ${this.market.polymarket_market_id} | Used: $${this.currentExposure} / $${max}`);
+    }
 
     try {
       // 5. Observe
@@ -146,7 +149,6 @@ export class MarketLoop {
       );
 
       if (!observation) {
-          Logger.info(`[EXPOSURE] NO_CHANGE reason=OBSERVATION_NULL`);
           return;
       }
 
@@ -197,14 +199,12 @@ export class MarketLoop {
                 Logger.info(`[DRY_RUN] Simulated trade — exposure unchanged`);
                 this.lastTradeTime = now; // Respect cooldown
             } else {
-                Logger.info(`[EXPOSURE] NO_CHANGE reason=EXECUTION_SKIPPED`);
+                Logger.info(`[EXEC_SKIP] Trade Skipped`);
             }
          } else {
-             Logger.info(`[EXPOSURE] NO_CHANGE reason=COOLDOWN`);
+             // Logger.info(`[COOLDOWN] Waiting...`);
          }
-      } else {
-          // If not an opportunity, log no change occasionally or via the generic CHECK log
-      }
+      } 
 
       // 7. State Persistence (With Run ID)
       const nowTs = new Date().toISOString();

@@ -1,4 +1,3 @@
-
 import { Market } from '../types/tables';
 import { Logger } from '../utils/logger';
 import { supabase } from '../services/supabase';
@@ -14,10 +13,10 @@ import { supabase } from '../services/supabase';
  */
 export class RiskGovernor {
   // Step 6 Constants
-  public static readonly GLOBAL_MAX_EXPOSURE = 500; // Hard limit $500 total risk across all markets
-  public static readonly MAX_PER_MARKET = 50;       // Hard limit $50 per market
-  public static readonly MAX_RISK_PER_TRADE = 0.01; // 1% of Bankroll
-  public static readonly VIRTUAL_BANKROLL = 1000;   // Assumed bankroll for sizing
+  public static readonly GLOBAL_MAX_EXPOSURE = 5000; // Hard limit $5000 total risk across all markets
+  public static readonly MAX_PER_MARKET = 1000;      // Hard limit $1000 per market (Increased from $50)
+  public static readonly MAX_RISK_PER_TRADE = 0.05;  // 5% of Bankroll (Increased for testing flexibility)
+  public static readonly VIRTUAL_BANKROLL = 1000;    // Assumed bankroll for sizing
 
   /**
    * Checks if a trade is safe to execute.
@@ -37,13 +36,13 @@ export class RiskGovernor {
 
     // 2. Check Market Hard Cap
     if (currentExposure + amountUSDC > RiskGovernor.MAX_PER_MARKET) {
-      Logger.warn(`[RISK] VETO: Market Cap Reached for ${market.polymarket_market_id}.`);
+      Logger.warn(`[RISK] VETO: Hard Cap Reached ($${RiskGovernor.MAX_PER_MARKET}) for ${market.polymarket_market_id}.`);
       return false;
     }
 
     // 3. Check Configured Market Exposure Limit
     if (currentExposure + amountUSDC > market.max_exposure) {
-      Logger.warn(`[RISK] VETO: User Exposure Limit Reached.`);
+      Logger.warn(`[RISK] VETO: User Budget Limit Reached ($${market.max_exposure}).`);
       return false;
     }
 
@@ -99,8 +98,8 @@ export class RiskGovernor {
    * Calculates safe bet size based on "Fixed Fraction + Hard Cap" rule.
    */
   public calculateBetSize(): number {
-    const fractionalSize = RiskGovernor.VIRTUAL_BANKROLL * RiskGovernor.MAX_RISK_PER_TRADE; // $1000 * 0.01 = $10
-    const hardCap = 20; // Individual trade cap
+    const fractionalSize = RiskGovernor.VIRTUAL_BANKROLL * RiskGovernor.MAX_RISK_PER_TRADE; 
+    const hardCap = 100; // Individual trade cap increased
     
     return Math.min(fractionalSize, hardCap);
   }
