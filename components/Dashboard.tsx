@@ -262,21 +262,38 @@ export const Dashboard: React.FC = () => {
           return;
       }
       
-      const { data: m } = await supabase
+      // 1. Try to find the market
+      let { data: m } = await supabase
         .from('markets')
         .select('id')
         .eq('polymarket_market_id', marketSlug)
-        .single();
+        .maybeSingle();
         
+      // 2. If not found, create it (lazily) so we can attach state
+      if (!m) {
+          const { data: newM, error: createErr } = await supabase.from('markets').insert({
+              polymarket_market_id: marketSlug,
+              asset: 'BTC', // Default fallback
+              enabled: false,
+              direction: 'UP',
+              max_exposure: 100
+          }).select('id').single();
+          
+          if (createErr || !newM) {
+              alert("Error creating market record: " + createErr?.message);
+              return;
+          }
+          m = newM;
+      }
+      
+      // 3. Perform the Reset
       if (m) {
           await supabase.from('market_state').update({ 
               exposure: 0,
               last_update: new Date().toISOString()
           }).eq('market_id', m.id);
           
-          alert(`Exposure reset to $0 for ${marketSlug}`);
-      } else {
-          alert("Market not found in DB.");
+          alert(`Exposure initialized and reset to $0 for ${marketSlug}`);
       }
   };
 
