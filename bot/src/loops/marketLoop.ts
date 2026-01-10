@@ -1,4 +1,3 @@
-
 import { Market, MarketStateRow } from '../types/tables';
 import { Logger } from '../utils/logger';
 import { ENV } from '../config/env';
@@ -171,6 +170,9 @@ export class MarketLoop {
             if (result.executed) {
                 this.currentExposure = result.newExposure; // MUTATION POINT
                 this.lastTradeTime = now;
+            } else if (result.simulated) {
+                Logger.info(`[DRY_RUN] Simulated trade — exposure unchanged`);
+                this.lastTradeTime = now; // Respect cooldown
             } else {
                 Logger.info(`[EXPOSURE] NO_CHANGE reason=EXECUTION_SKIPPED`);
             }

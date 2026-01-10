@@ -1,4 +1,3 @@
-
 import { Market } from '../types/tables';
 import { MarketObservation } from '../types/marketEdge';
 import { Logger } from '../utils/logger';
@@ -12,7 +11,7 @@ export class ExecutionService {
   
   private static readonly MAX_ENTRY_PRICE_DEFAULT = 0.95;
 
-  public async attemptTrade(market: Market, obs: MarketObservation, currentExposure: number): Promise<{ executed: boolean, newExposure: number }> {
+  public async attemptTrade(market: Market, obs: MarketObservation, currentExposure: number): Promise<{ executed: boolean, simulated?: boolean, newExposure: number }> {
     const contextId = `EXEC-${Date.now()}`;
     const mode = ENV.DRY_RUN ? 'DRY_RUN' : 'LIVE';
     
@@ -124,19 +123,28 @@ export class ExecutionService {
     Logger.info(`[${contextId}] EXEC ${sideToBuy}: ${betSizeUSDC} USDC @ ${entryLimitPrice} | Model: ${(obs.calculatedProbability!*100).toFixed(1)}%`);
 
     try {
-      let orderId = 'DRY-RUN-ID';
+      if (ENV.DRY_RUN) {
+          await new Promise(r => setTimeout(r, 200)); 
+          
+          this.log({ 
+            ...eventPayload, 
+            status: 'EXECUTED', 
+            decision_reason: 'DRY_RUN_EXEC',
+            context: { orderId: 'DRY-RUN-ID', shares, filledPrice: entryLimitPrice, mode: mode, dry_run: true }
+          });
 
-      if (!ENV.DRY_RUN) {
-        orderId = await polymarket.placeOrder(tokenId, 'BUY', entryLimitPrice, shares);
-      } else {
-        await new Promise(r => setTimeout(r, 200)); 
+          // DO NOT LOG EXPOSURE CONSUME
+          return { executed: false, simulated: true, newExposure: currentExposure };
       }
+
+      // LIVE EXECUTION
+      const orderId = await polymarket.placeOrder(tokenId, 'BUY', entryLimitPrice, shares);
       
       this.log({ 
         ...eventPayload, 
         status: 'EXECUTED', 
         decision_reason: 'EXECUTED',
-        context: { orderId, shares, filledPrice: entryLimitPrice, mode: mode, dry_run: ENV.DRY_RUN }
+        context: { orderId, shares, filledPrice: entryLimitPrice, mode: mode, dry_run: false }
       });
       
       // LOG CRITICAL EXPOSURE CONSUMPTION
