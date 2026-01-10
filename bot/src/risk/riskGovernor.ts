@@ -1,6 +1,7 @@
 import { Market } from '../types/tables';
 import { Logger } from '../utils/logger';
 import { supabase } from '../services/supabase';
+import { ENV } from '../config/env';
 
 /**
  * The Risk Governor is the final authority. 
@@ -32,6 +33,12 @@ export class RiskGovernor {
     if (error || control?.desired_state !== 'running') {
       Logger.warn(`[RISK] VETO: Global Kill Switch is ACTIVE (State: ${control?.desired_state})`);
       return false;
+    }
+
+    // DRY RUN: Bypass Exposure Limits
+    if (ENV.DRY_RUN) {
+      Logger.info(`[RISK] DRY_RUN mode — exposure limits bypassed`);
+      return true;
     }
 
     // 2. Check Market Hard Cap
