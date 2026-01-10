@@ -4,7 +4,7 @@ import {
   Terminal, BarChart3, Microscope, FastForward, History,
   Settings, Database, FlaskConical, Target, TrendingUp, Filter,
   CheckCircle, XCircle, AlertTriangle, Plus, Clipboard, Power, RefreshCw,
-  BrainCircuit, FileText, Search, ArrowRight, Download, RefreshCcw, Info
+  BrainCircuit, FileText, Search, ArrowRight, Download, RefreshCcw, Info, Trash2
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -89,6 +89,7 @@ export const Dashboard: React.FC = () => {
   const [testRuns, setTestRuns] = useState<TestRun[]>([]);
   const [trades, setTrades] = useState<TradeEvent[]>([]);
   const [activeTestRunId, setActiveTestRunId] = useState<string | 'ALL'>('ALL');
+  const [enabledMarkets, setEnabledMarkets] = useState<any[]>([]);
   
   // New Run State
   const [newRunName, setNewRunName] = useState("");
@@ -118,10 +119,12 @@ export const Dashboard: React.FC = () => {
     fetchTestRuns();
     fetchTrades();
     fetchBotStatus();
+    fetchEnabledMarkets();
     
     const interval = setInterval(() => {
         fetchTrades();
         fetchBotStatus();
+        fetchEnabledMarkets();
     }, 5000); 
     return () => clearInterval(interval);
   }, [activeTestRunId]);
@@ -133,6 +136,11 @@ export const Dashboard: React.FC = () => {
       const { data: control } = await supabase.from('bot_control').select('desired_state').single();
       if (control) setDesiredState(control.desired_state);
   }
+
+  const fetchEnabledMarkets = async () => {
+    const { data } = await supabase.from('markets').select('*').eq('enabled', true);
+    if (data) setEnabledMarkets(data);
+  };
 
   const fetchFeeConfig = async () => {
     const { data } = await supabase.from('fee_config').select('*').single();
@@ -236,6 +244,7 @@ export const Dashboard: React.FC = () => {
       setNewRunHypothesis("");
       fetchTestRuns();
       fetchBotStatus();
+      fetchEnabledMarkets();
       alert(`Experiment "${runData.name}" Started! Used Budget reset to $0. (Bot has $${expConfig.maxExposure} available to spend).`);
   };
 
@@ -254,6 +263,29 @@ export const Dashboard: React.FC = () => {
 
       fetchTestRuns();
       fetchBotStatus();
+      fetchEnabledMarkets();
+  };
+  
+  const handleKillMarket = async (id: string) => {
+      const { error } = await supabase.from('markets').update({ enabled: false }).eq('id', id);
+      if (!error) {
+          fetchEnabledMarkets();
+          alert("Market Disabled. Bot will remove it on next tick.");
+      } else {
+          alert("Error disabling market: " + error.message);
+      }
+  };
+
+  const handleStopAllMarkets = async () => {
+      if(!confirm("ARE YOU SURE? This will disable ALL markets in the database.")) return;
+      
+      const { error } = await supabase.from('markets').update({ enabled: false });
+      if (error) {
+          alert("Failed to stop markets: " + error.message);
+      } else {
+          fetchEnabledMarkets();
+          alert("All markets disabled. Bot should idle shortly.");
+      }
   };
 
   const handleResetExposure = async (marketSlug: string) => {
@@ -421,9 +453,30 @@ export const Dashboard: React.FC = () => {
                       </div>
                   </div>
               </div>
-              <div className="text-right">
-                  <div className="text-xs text-zinc-500 uppercase">Active Markets</div>
-                  <div className="text-2xl font-mono font-bold text-white">{botHeartbeat?.active_markets || 0}</div>
+              
+              <div className="flex flex-col items-end">
+                  <div className="text-xs text-zinc-500 uppercase mb-1">Active Engines</div>
+                  <div className="text-2xl font-mono font-bold text-white mb-2">{enabledMarkets.length}</div>
+                  
+                  <div className="space-y-1 w-full flex flex-col items-end">
+                      {enabledMarkets.map(m => (
+                          <div key={m.id} className="flex items-center gap-2 bg-zinc-950/50 px-2 py-1 rounded border border-zinc-800 group">
+                              <span className="text-[10px] text-emerald-500 font-mono">
+                                  {m.asset || 'UNK'}
+                              </span>
+                              <span className="text-[10px] text-zinc-400 max-w-[80px] truncate" title={m.polymarket_market_id}>
+                                  {m.polymarket_market_id}
+                              </span>
+                              <button 
+                                  onClick={() => handleKillMarket(m.id)}
+                                  className="text-zinc-600 hover:text-red-500 transition-colors"
+                                  title="Force Disable Market"
+                              >
+                                  <XCircle size={12} />
+                              </button>
+                          </div>
+                      ))}
+                  </div>
               </div>
           </div>
       );
@@ -932,7 +985,17 @@ export const Dashboard: React.FC = () => {
               </div>
 
               <div className="bg-zinc-900 border border-zinc-800 rounded p-4">
-                 <h3 className="text-xs font-bold text-zinc-500 uppercase mb-3">Quick Actions</h3>
+                 <h3 className="text-xs font-bold text-zinc-500 uppercase mb-3 text-red-500">Danger Zone</h3>
+                 <div className="space-y-2">
+                    <button 
+                        onClick={handleStopAllMarkets}
+                        className="w-full text-left text-xs bg-red-950/20 hover:bg-red-950/40 p-2 rounded border border-red-900/50 text-red-400 transition-colors flex items-center gap-2"
+                    >
+                        <Trash2 size={12} /> STOP ALL MARKETS
+                    </button>
+                 </div>
+                 
+                 <h3 className="text-xs font-bold text-zinc-500 uppercase mb-3 mt-6">Quick Actions</h3>
                  <div className="space-y-2">
                     <button 
                         onClick={handleForceSync}
