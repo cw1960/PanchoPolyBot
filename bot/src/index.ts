@@ -1,8 +1,9 @@
+
 import { validateEnv } from './config/env';
 import { ControlLoop } from './loops/controlLoop';
 import { MarketRegistry } from './services/marketRegistry';
 import { HeartbeatService } from './services/heartbeat';
-import { logEvent } from './services/supabase';
+import { logEvent, supabase } from './services/supabase';
 import { Logger } from './utils/logger';
 
 async function main() {
@@ -18,6 +19,14 @@ async function main() {
 
   // 3. Start Lifecycle
   await logEvent('INFO', 'VPS Process Started');
+  
+  // FIX: Reset Exposure on Boot to prevent stale state from blocking trades
+  try {
+      await supabase.from('market_state').update({ exposure: 0 }).neq('exposure', 0);
+      Logger.info("Cleaned up stale exposure state.");
+  } catch (err) {
+      Logger.warn("Failed to reset exposure state on boot.", err);
+  }
   
   heartbeat.start(() => registry.getActiveCount());
   await controlLoop.start();

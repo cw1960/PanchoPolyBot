@@ -1,3 +1,4 @@
+
 import { Market } from '../types/tables';
 import { Logger } from '../utils/logger';
 import { supabase } from '../services/supabase';
@@ -47,18 +48,33 @@ export class RiskGovernor {
     }
 
     // 4. Check Global Exposure (DB Summation)
-    // SAFETY NOTE: This query sums all persisted market states. 
-    // While a sub-second race condition exists between parallel loops (Read-Modify-Write gap), 
-    // the max_exposure caps and polling intervals provide sufficient dampening for V1 architecture.
-    const { data: allStates, error: stateError } = await supabase.from('market_state').select('exposure');
+    // FIX: Only sum exposure for ENABLED markets to avoid "Ghost Exposure" from disabled/old markets.
+    // We first get the IDs of enabled markets.
+    const { data: enabledMarkets } = await supabase
+        .from('markets')
+        .select('id')
+        .eq('enabled', true);
+        
+    if (!enabledMarkets) {
+        Logger.warn("[RISK] Could not fetch enabled markets. Defaulting to Reject.");
+        return false;
+    }
+
+    const enabledIds = enabledMarkets.map(m => m.id);
+
+    // Now sum exposure only for those IDs
+    const { data: activeStates, error: stateError } = await supabase
+        .from('market_state')
+        .select('exposure')
+        .in('market_id', enabledIds);
     
-    if (stateError || !allStates) {
+    if (stateError || !activeStates) {
       Logger.error("[RISK] FAILED to fetch global exposure. Defaulting to REJECT.", stateError);
       return false; // Fail safe
     }
 
-    // Sum all active exposures from the database
-    const currentGlobalExposure = allStates.reduce((sum, row) => sum + (row.exposure || 0), 0);
+    // Sum all ACTIVE exposures from the database
+    const currentGlobalExposure = activeStates.reduce((sum, row) => sum + (row.exposure || 0), 0);
     
     // Check if adding the new bet would breach the Global Max
     if (currentGlobalExposure + amountUSDC > RiskGovernor.GLOBAL_MAX_EXPOSURE) {
