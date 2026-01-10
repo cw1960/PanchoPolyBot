@@ -25,7 +25,6 @@ export class ExecutionService {
     const confidenceThreshold = expParams.confidenceThreshold || 0.60;
     
     // Price at which we are willing to enter (limit price)
-    // In a real sniper, we might pick the Best Ask directly, but for safety we cap it.
     const entryLimitPrice = market.max_entry_price || ExecutionService.MAX_ENTRY_PRICE_DEFAULT;
     
     // Calculate expected metrics
@@ -39,19 +38,18 @@ export class ExecutionService {
         time_remaining_ms: obs.timeToExpiryMs,
         spot_price: obs.spot.price,
         delta: obs.delta,
-        // The core discrepancy
         implied_probability: obs.impliedProbability,
         model_probability: obs.calculatedProbability,
-        z_score: obs.calculatedProbability ? (obs.calculatedProbability - 0.5) * 2 : 0, // Approx
+        z_score: obs.calculatedProbability ? (obs.calculatedProbability - 0.5) * 2 : 0, 
         direction: obs.direction
     };
 
     const eventPayload = {
-      test_run_id: market.active_run_id, 
+      test_run_id: market.active_run_id || null, 
       market_id: market.id,
       polymarket_market_id: market.polymarket_market_id,
       asset: market.asset,
-      mode: mode,
+      // Removed 'mode' from top level
       side: obs.direction,
       stake_usd: betSizeUSDC,
       entry_prob: entryLimitPrice,
@@ -62,7 +60,7 @@ export class ExecutionService {
         buy_fee_pct: metrics.buyFeePct,
         sell_fee_pct: metrics.sellFeePct
       },
-      signals: signalSnapshot, // Full snapshot here
+      signals: signalSnapshot, 
       status: 'INTENDED',
       decision_reason: 'ANALYZING',
       outcome: 'OPEN'
@@ -76,27 +74,48 @@ export class ExecutionService {
 
     // 2. CONFIDENCE CHECK
     if (obs.confidence < confidenceThreshold) {
-      this.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'CONFIDENCE_TOO_LOW', dry_run: ENV.DRY_RUN });
+      this.log({ 
+          ...eventPayload, 
+          status: 'SKIPPED', 
+          decision_reason: 'CONFIDENCE_TOO_LOW', 
+          context: { mode: mode, dry_run: ENV.DRY_RUN }
+      });
       return { executed: false, newExposure: currentExposure };
     }
 
     // 3. EXPOSURE CHECK
     if (currentExposure + betSizeUSDC > maxExposure) {
-      this.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'MAX_EXPOSURE_HIT', dry_run: ENV.DRY_RUN });
+      this.log({ 
+          ...eventPayload, 
+          status: 'SKIPPED', 
+          decision_reason: 'MAX_EXPOSURE_HIT', 
+          context: { mode: mode, dry_run: ENV.DRY_RUN }
+      });
       return { executed: false, newExposure: currentExposure };
     }
 
     // 4. RISK APPROVAL
     const approved = await riskGovernor.requestApproval(market, betSizeUSDC, currentExposure);
     if (!approved) {
-      this.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'RISK_VETO', dry_run: ENV.DRY_RUN });
+      this.log({ 
+          ...eventPayload, 
+          status: 'SKIPPED', 
+          decision_reason: 'RISK_VETO', 
+          context: { mode: mode, dry_run: ENV.DRY_RUN } 
+      });
       return { executed: false, newExposure: currentExposure };
     }
 
     // 5. RESOLVE TOKENS
     const tokens = await polymarket.getTokens(market.polymarket_market_id);
     if (!tokens) {
-      this.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'TOKEN_RESOLVE_FAIL', error: 'Tokens not found', dry_run: ENV.DRY_RUN });
+      this.log({ 
+          ...eventPayload, 
+          status: 'SKIPPED', 
+          decision_reason: 'TOKEN_RESOLVE_FAIL', 
+          error: 'Tokens not found', 
+          context: { mode: mode, dry_run: ENV.DRY_RUN } 
+      });
       return { executed: false, newExposure: currentExposure };
     }
     const tokenId = sideToBuy === 'UP' ? tokens.up : tokens.down;
@@ -117,8 +136,7 @@ export class ExecutionService {
         ...eventPayload, 
         status: 'EXECUTED', 
         decision_reason: 'EXECUTED',
-        context: { orderId, shares, filledPrice: entryLimitPrice },
-        dry_run: ENV.DRY_RUN
+        context: { orderId, shares, filledPrice: entryLimitPrice, mode: mode, dry_run: ENV.DRY_RUN }
       });
 
       return { executed: true, newExposure: currentExposure + betSizeUSDC };
@@ -130,16 +148,21 @@ export class ExecutionService {
           status: 'SKIPPED', 
           decision_reason: 'EXECUTION_ERROR', 
           error: err.message,
-          dry_run: ENV.DRY_RUN
+          context: { mode: mode, dry_run: ENV.DRY_RUN }
       });
       return { executed: false, newExposure: currentExposure };
     }
   }
 
   private log(data: any) {
+    // Sanitization: Ensure no rogue fields leak in that aren't columns
+    const { mode, ...cleanData } = data;
+
     Promise.resolve().then(async () => {
-        const { error } = await supabase.from('trade_events').insert(data);
-        if (error) Logger.error("DB Log Fail", error);
+        const { error } = await supabase.from('trade_events').insert(cleanData);
+        if (error) {
+            Logger.error("DB Log Fail", error);
+        }
     });
   }
 }
