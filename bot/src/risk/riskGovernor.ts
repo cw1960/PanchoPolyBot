@@ -14,7 +14,7 @@ import { ENV } from '../config/env';
  */
 export class RiskGovernor {
   // Step 6 Constants
-  public static readonly GLOBAL_MAX_EXPOSURE = 10000; // Hard limit $10,000 (Bumped for testing)
+  public static readonly GLOBAL_MAX_EXPOSURE = 10000; // Hard limit $10,000
   public static readonly MAX_PER_MARKET = 2000;       // Hard limit $2,000 per market
   public static readonly MAX_RISK_PER_TRADE = 0.05;   // 5% of Bankroll
   public static readonly VIRTUAL_BANKROLL = 5000;     // Assumed bankroll for sizing
@@ -28,6 +28,7 @@ export class RiskGovernor {
   public async requestApproval(market: Market, amountUSDC: number, currentExposure: number): Promise<boolean> {
     
     // 1. Check Global Kill Switch (Live DB Check)
+    // This MUST run in all modes to ensure we can panic stop the bot.
     const { data: control, error } = await supabase.from('bot_control').select('desired_state').eq('id', 1).single();
     
     if (error || control?.desired_state !== 'running') {
@@ -35,12 +36,16 @@ export class RiskGovernor {
       return false;
     }
 
-    // 2. DRY RUN: Bypass Exposure Limits (CRITICAL FOR TESTING)
+    // 2. DRY RUN: Bypass ALL Exposure Limits
+    // We return immediately to avoid overhead and ensuring no cap is ever enforced.
     if (ENV.DRY_RUN) {
-      // We explicitly log this only once in a while or verbose to confirm it's working
-      // Logger.info(`[RISK] DRY_RUN bypass active. Ignoring limits.`);
+      Logger.info(`[RISK] DRY_RUN mode — bypassing exposure limits (global + per-market)`);
       return true;
     }
+
+    // ---------------------------------------------------------
+    // LIVE MODE CHECKS BELOW
+    // ---------------------------------------------------------
 
     // 3. Check Market Hard Cap
     if (currentExposure + amountUSDC > RiskGovernor.MAX_PER_MARKET) {
@@ -57,7 +62,7 @@ export class RiskGovernor {
     // 5. Check Global Exposure (Strict Scoping)
     const { data: enabledMarkets } = await supabase
         .from('markets')
-        .select('id, active_run_id')
+        .select('id, polymarket_market_id, active_run_id')
         .eq('enabled', true);
         
     if (!enabledMarkets) {
@@ -78,17 +83,29 @@ export class RiskGovernor {
     }
 
     let currentGlobalExposure = 0;
+    const debugContributors: any[] = [];
 
     for (const state of activeStates) {
         const marketConfig = enabledMarkets.find(m => m.id === state.market_id);
+        
+        // Strict Scope Check: The state row must belong to the currently active run for this market
         if (marketConfig && marketConfig.active_run_id && state.run_id === marketConfig.active_run_id) {
-            currentGlobalExposure += (state.exposure || 0);
+            const exp = state.exposure || 0;
+            currentGlobalExposure += exp;
+            
+            // Collect debug info for logs if we hit the cap
+            debugContributors.push({ 
+                slug: marketConfig.polymarket_market_id.substring(0, 15) + '...', 
+                run: state.run_id.split('-')[0], 
+                exp 
+            });
         }
     }
     
     // Check if adding the new bet would breach the Global Max
     if (currentGlobalExposure + amountUSDC > RiskGovernor.GLOBAL_MAX_EXPOSURE) {
       Logger.warn(`[RISK] GLOBAL_CAP_REACHED: Current $${currentGlobalExposure} + Bet $${amountUSDC} > Max $${RiskGovernor.GLOBAL_MAX_EXPOSURE}`);
+      Logger.warn(`[RISK] Contributors: ${JSON.stringify(debugContributors)}`);
       return false;
     }
     
