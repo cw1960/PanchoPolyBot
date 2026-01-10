@@ -158,7 +158,10 @@ export const Dashboard: React.FC = () => {
     if (activeTestRunId !== 'ALL') {
       query = query.eq('test_run_id', activeTestRunId);
     }
-    const { data } = await query;
+    const { data, error } = await query;
+    if (error) {
+        console.error("Error fetching trades:", error);
+    }
     if (data) setTrades(data);
   };
 

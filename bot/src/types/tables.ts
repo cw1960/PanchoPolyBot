@@ -1,4 +1,5 @@
 
+
 export interface BotControl {
   id: number;
   desired_state: 'running' | 'stopped';
@@ -71,4 +72,5 @@ export interface TradeEventRow {
   context?: any;
   signals?: any;
   error?: string;
+  created_at?: string;
 }

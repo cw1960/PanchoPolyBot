@@ -1,12 +1,12 @@
 
-import { Market } from '../types/tables';
+import { Market, TradeEventRow } from '../types/tables';
 import { MarketObservation } from '../types/marketEdge';
 import { Logger } from '../utils/logger';
 import { riskGovernor } from '../risk/riskGovernor';
 import { polymarket } from './polymarket';
 import { ENV } from '../config/env';
 import { feeModel } from './feeModel';
-import { supabase } from './supabase';
+import { TradeLogger } from './tradeLogger';
 
 export class ExecutionService {
   
@@ -53,12 +53,11 @@ export class ExecutionService {
         direction: obs.direction
     };
 
-    const eventPayload = {
-      test_run_id: market.active_run_id || null, 
+    const eventPayload: TradeEventRow = {
+      test_run_id: market.active_run_id || undefined, 
       market_id: market.id,
       polymarket_market_id: market.polymarket_market_id,
       asset: market.asset,
-      // Removed 'mode' from top level
       side: obs.direction,
       stake_usd: betSizeUSDC,
       entry_prob: entryLimitPrice,
@@ -72,7 +71,8 @@ export class ExecutionService {
       signals: signalSnapshot, 
       status: 'INTENDED',
       decision_reason: 'ANALYZING',
-      outcome: 'OPEN'
+      outcome: 'OPEN',
+      context: { mode, dry_run: ENV.DRY_RUN }
     };
 
     // 1. DIRECTION CHECK
@@ -83,22 +83,20 @@ export class ExecutionService {
 
     // 2. CONFIDENCE CHECK
     if (obs.confidence < confidenceThreshold) {
-      this.log({ 
+      TradeLogger.log({ 
           ...eventPayload, 
           status: 'SKIPPED', 
-          decision_reason: 'CONFIDENCE_TOO_LOW', 
-          context: { mode, dry_run: ENV.DRY_RUN }
+          decision_reason: 'CONFIDENCE_TOO_LOW' 
       });
       return { executed: false, newExposure: currentExposure };
     }
 
     // 3. EXPOSURE CHECK
     if (currentExposure + betSizeUSDC > maxExposure) {
-      this.log({ 
+      TradeLogger.log({ 
           ...eventPayload, 
           status: 'SKIPPED', 
-          decision_reason: 'MAX_EXPOSURE_HIT', 
-          context: { mode, dry_run: ENV.DRY_RUN }
+          decision_reason: 'MAX_EXPOSURE_HIT' 
       });
       return { executed: false, newExposure: currentExposure };
     }
@@ -106,11 +104,10 @@ export class ExecutionService {
     // 4. RISK APPROVAL
     const approved = await riskGovernor.requestApproval(market, betSizeUSDC, currentExposure);
     if (!approved) {
-      this.log({ 
+      TradeLogger.log({ 
           ...eventPayload, 
           status: 'SKIPPED', 
-          decision_reason: 'RISK_VETO', 
-          context: { mode, dry_run: ENV.DRY_RUN } 
+          decision_reason: 'RISK_VETO' 
       });
       return { executed: false, newExposure: currentExposure };
     }
@@ -118,12 +115,11 @@ export class ExecutionService {
     // 5. RESOLVE TOKENS
     const tokens = await polymarket.getTokens(market.polymarket_market_id);
     if (!tokens) {
-      this.log({ 
+      TradeLogger.log({ 
           ...eventPayload, 
           status: 'SKIPPED', 
           decision_reason: 'TOKEN_RESOLVE_FAIL', 
-          error: 'Tokens not found', 
-          context: { mode, dry_run: ENV.DRY_RUN } 
+          error: 'Tokens not found' 
       });
       return { executed: false, newExposure: currentExposure };
     }
@@ -136,7 +132,7 @@ export class ExecutionService {
       if (ENV.DRY_RUN) {
           await new Promise(r => setTimeout(r, 200)); 
           
-          this.log({ 
+          TradeLogger.log({ 
             ...eventPayload, 
             status: 'EXECUTED', 
             decision_reason: 'DRY_RUN_EXEC',
@@ -150,7 +146,7 @@ export class ExecutionService {
       // LIVE EXECUTION
       const orderId = await polymarket.placeOrder(tokenId, 'BUY', entryLimitPrice, shares);
       
-      this.log({ 
+      TradeLogger.log({ 
         ...eventPayload, 
         status: 'EXECUTED', 
         decision_reason: 'EXECUTED',
@@ -164,33 +160,14 @@ export class ExecutionService {
 
     } catch (err: any) {
       Logger.error(`[${contextId}] EXEC FAIL`, err);
-      this.log({ 
+      TradeLogger.log({ 
           ...eventPayload, 
           status: 'SKIPPED', 
           decision_reason: 'EXECUTION_ERROR', 
-          error: err.message,
-          context: { mode, dry_run: ENV.DRY_RUN }
+          error: err.message
       });
       return { executed: false, newExposure: currentExposure };
     }
-  }
-
-  private log(data: any) {
-    // Attempt to log to Supabase.
-    Promise.resolve().then(async () => {
-        // Strip out 'mode' if it was accidentally passed in top-level, though we prefer it in context
-        const { mode, ...cleanData } = data;
-        
-        // Ensure context is JSON-compatible if necessary
-        // Supabase JSONB columns handle objects fine.
-        
-        const { error } = await supabase.from('trade_events').insert(cleanData);
-        if (error) {
-            Logger.error(`DB_LOG_FAIL: ${error.message}`, error);
-            // Fallback: Try removing complex fields if they are causing issues?
-            // For now, logging the error clearly is sufficient to debug.
-        }
-    });
   }
 }
 
