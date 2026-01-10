@@ -4,7 +4,7 @@ import {
   Terminal, BarChart3, Microscope, FastForward, History,
   Settings, Database, FlaskConical, Target, TrendingUp, Filter,
   CheckCircle, XCircle, AlertTriangle, Plus, Clipboard, Power, RefreshCw,
-  BrainCircuit, FileText, Search, ArrowRight, Download, RefreshCcw
+  BrainCircuit, FileText, Search, ArrowRight, Download, RefreshCcw, Info
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -236,7 +236,7 @@ export const Dashboard: React.FC = () => {
       setNewRunHypothesis("");
       fetchTestRuns();
       fetchBotStatus();
-      alert(`Experiment "${runData.name}" Started! Exposure Reset.`);
+      alert(`Experiment "${runData.name}" Started! Budget Reset to $0 (Full Capacity).`);
   };
 
   const handleStopTest = async (runId: string) => {
@@ -293,7 +293,7 @@ export const Dashboard: React.FC = () => {
               last_update: new Date().toISOString()
           }).eq('market_id', m.id);
           
-          alert(`Exposure initialized and reset to $0 for ${marketSlug}`);
+          alert(`Used Budget reset to $0. Bot now has full capacity for ${marketSlug}`);
       }
   };
 
@@ -634,8 +634,11 @@ export const Dashboard: React.FC = () => {
                                 </div>
                             </div>
 
-                            <div className="flex justify-between items-center">
-                                <span className="text-xs text-zinc-400 font-bold">Max Exposure</span>
+                            <div className="flex justify-between items-center group relative">
+                                <div className="flex items-center gap-1">
+                                  <span className="text-xs text-zinc-400 font-bold">Max Budget ($)</span>
+                                  <Info size={10} className="text-zinc-600" />
+                                </div>
                                 <div className="flex items-center gap-1">
                                     <span className="text-[10px] text-zinc-600">$</span>
                                     <input 
@@ -644,6 +647,10 @@ export const Dashboard: React.FC = () => {
                                         value={expConfig.maxExposure}
                                         onChange={e => setExpConfig(c => ({...c, maxExposure: parseFloat(e.target.value)}))}
                                     />
+                                </div>
+                                {/* Tooltip */}
+                                <div className="absolute bottom-full left-0 mb-2 w-48 bg-black border border-zinc-700 p-2 rounded text-[10px] text-zinc-400 hidden group-hover:block z-50 shadow-lg">
+                                  Total amount the bot is allowed to spend. The bot stops trading when Used >= Max.
                                 </div>
                             </div>
 
@@ -661,12 +668,16 @@ export const Dashboard: React.FC = () => {
                     </div>
                     
                     {/* Action Bar */}
-                    <div className="mt-6 pt-4 border-t border-zinc-800 flex justify-end gap-3">
+                    <div className="mt-6 pt-4 border-t border-zinc-800 flex justify-end gap-3 items-center">
+                         <span className="text-[10px] text-zinc-600 mr-2">
+                           Budget Used: $0 / ${expConfig.maxExposure} (After Reset)
+                         </span>
                          <button 
                             onClick={() => handleResetExposure(targetSlug)}
-                            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-400 px-4 py-2 rounded text-xs font-bold transition-colors flex items-center gap-2"
+                            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-400 px-4 py-2 rounded text-xs font-bold transition-colors flex items-center gap-2 border border-zinc-700"
+                            title="Sets 'Used Budget' to $0, allowing the bot to trade again."
                          >
-                            <RefreshCcw size={12} /> RESET EXPOSURE ONLY
+                            <RefreshCcw size={12} /> RESET 'USED' BUDGET ($0)
                          </button>
                          <button 
                             onClick={handleStartTest}
@@ -691,7 +702,7 @@ export const Dashboard: React.FC = () => {
                           <div className="flex items-center gap-4 text-[10px] text-zinc-600 font-mono">
                               <span>Slug: {run.params?.targetSlug?.substring(0, 20) || 'N/A'}...</span>
                               <span>Mode: {run.params?.direction || 'BOTH'}</span>
-                              <span>Max: ${run.params?.maxExposure}</span>
+                              <span className="text-zinc-400">Budget Limit: ${run.params?.maxExposure}</span>
                           </div>
                         </div>
                         
