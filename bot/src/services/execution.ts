@@ -138,6 +138,9 @@ export class ExecutionService {
         decision_reason: 'EXECUTED',
         context: { orderId, shares, filledPrice: entryLimitPrice, mode: mode, dry_run: ENV.DRY_RUN }
       });
+      
+      // LOG CRITICAL EXPOSURE CONSUMPTION
+      Logger.info(`[EXPOSURE] CONSUME run=${market.active_run_id} market=${market.polymarket_market_id} +${betSizeUSDC}`);
 
       return { executed: true, newExposure: currentExposure + betSizeUSDC };
 

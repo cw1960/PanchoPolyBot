@@ -47,12 +47,12 @@ export class RiskGovernor {
       return false;
     }
 
-    // 4. Check Global Exposure (DB Summation)
-    // FIX: Only sum exposure for ENABLED markets to avoid "Ghost Exposure" from disabled/old markets.
-    // We first get the IDs of enabled markets.
+    // 4. Check Global Exposure (Strict Scoping)
+    // FIX: Only sum exposure for ENABLED markets in their ACTIVE run.
+    
     const { data: enabledMarkets } = await supabase
         .from('markets')
-        .select('id')
+        .select('id, active_run_id')
         .eq('enabled', true);
         
     if (!enabledMarkets) {
@@ -60,21 +60,31 @@ export class RiskGovernor {
         return false;
     }
 
-    const enabledIds = enabledMarkets.map(m => m.id);
+    // Extract relevant IDs
+    const marketIds = enabledMarkets.map(m => m.id);
 
-    // Now sum exposure only for those IDs
+    // Fetch states for these markets
     const { data: activeStates, error: stateError } = await supabase
         .from('market_state')
-        .select('exposure')
-        .in('market_id', enabledIds);
+        .select('market_id, exposure, run_id') // Fetch run_id to verify scope
+        .in('market_id', marketIds);
     
     if (stateError || !activeStates) {
       Logger.error("[RISK] FAILED to fetch global exposure. Defaulting to REJECT.", stateError);
-      return false; // Fail safe
+      return false;
     }
 
-    // Sum all ACTIVE exposures from the database
-    const currentGlobalExposure = activeStates.reduce((sum, row) => sum + (row.exposure || 0), 0);
+    // Sum exposure ONLY where the state's run_id matches the market's active_run_id
+    let currentGlobalExposure = 0;
+
+    for (const state of activeStates) {
+        const marketConfig = enabledMarkets.find(m => m.id === state.market_id);
+        
+        // Strict Scope Check: The state row must belong to the currently active run for this market
+        if (marketConfig && marketConfig.active_run_id && state.run_id === marketConfig.active_run_id) {
+            currentGlobalExposure += (state.exposure || 0);
+        }
+    }
     
     // Check if adding the new bet would breach the Global Max
     if (currentGlobalExposure + amountUSDC > RiskGovernor.GLOBAL_MAX_EXPOSURE) {

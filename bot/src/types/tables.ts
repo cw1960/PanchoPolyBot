@@ -35,6 +35,7 @@ export interface Market {
 // The "Eyes" of the bot. Written by EdgeEngine, read by UI.
 export interface MarketStateRow {
   market_id: string;
+  run_id?: string; // Added for strict exposure scoping
   status: 'WATCHING' | 'OPPORTUNITY' | 'LOCKED';
   chainlink_price: number;
   spot_price_median: number;

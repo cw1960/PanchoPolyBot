@@ -20,13 +20,8 @@ async function main() {
   // 3. Start Lifecycle
   await logEvent('INFO', 'VPS Process Started');
   
-  // FIX: Reset Exposure on Boot to prevent stale state from blocking trades
-  try {
-      await supabase.from('market_state').update({ exposure: 0 }).neq('exposure', 0);
-      Logger.info("Cleaned up stale exposure state.");
-  } catch (err) {
-      Logger.warn("Failed to reset exposure state on boot.", err);
-  }
+  // NOTE: Removed global exposure reset. Exposure is now scoped by run_id in MarketLoop.
+  // This allows the bot to restart without wiping state for active runs.
   
   heartbeat.start(() => registry.getActiveCount());
   await controlLoop.start();
