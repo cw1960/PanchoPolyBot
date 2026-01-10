@@ -14,6 +14,9 @@ export class MarketLoop {
   private currentExposure: number = 0; 
   private lastRunId: string | undefined = undefined;
   
+  // To handle external resets
+  private lastWriteTime: number = 0;
+  
   // ROLLING STATE
   private priceHistory: { price: number, time: number }[] = [];
   private signalHistory: boolean[] = []; 
@@ -27,6 +30,7 @@ export class MarketLoop {
   constructor(market: Market) {
     this.market = market;
     this.edgeEngine = new EdgeEngine();
+    this.lastWriteTime = Date.now();
   }
 
   public async start() {
@@ -92,7 +96,26 @@ export class MarketLoop {
         Logger.info(`[EXPOSURE] INIT run=${run.id} market=${this.market.polymarket_market_id} used=0`);
     }
 
-    // 2. Invariant Guardrail: Exposure Hallucination Check
+    // 2. EXTERNAL RESET DETECTION
+    // If we have local exposure, check if the DB was reset by the UI recently.
+    if (this.currentExposure > 0) {
+        const { data: remoteState } = await supabase
+           .from('market_state')
+           .select('exposure, last_update')
+           .eq('market_id', this.market.id)
+           .single();
+
+        if (remoteState && remoteState.last_update) {
+            const remoteTime = new Date(remoteState.last_update).getTime();
+            // If remote exposure is 0 AND the update happened AFTER our last write
+            if (remoteState.exposure === 0 && remoteTime > this.lastWriteTime) {
+                Logger.info(`[LOOP] External Exposure Reset Detected. Local: ${this.currentExposure} -> 0`);
+                this.currentExposure = 0;
+            }
+        }
+    }
+
+    // 3. Invariant Guardrail: Exposure Hallucination Check
     // If we think we have exposure, verify against the Ledger (trade_events)
     if (this.currentExposure > 0) {
        const { count, error } = await supabase
@@ -109,12 +132,12 @@ export class MarketLoop {
        }
     }
 
-    // 3. Log Exposure Check
+    // 4. Log Exposure Check
     const max = run.params?.maxExposure || this.market.max_exposure || 50;
     Logger.info(`[EXPOSURE] CHECK run=${run.id} market=${this.market.polymarket_market_id} used=${this.currentExposure} remaining=${max - this.currentExposure}`);
 
     try {
-      // 4. Observe
+      // 5. Observe
       const tradeSize = run.params?.tradeSize || DEFAULTS.DEFAULT_BET_SIZE;
       const observation = await this.edgeEngine.observe(
           this.market, 
@@ -154,7 +177,7 @@ export class MarketLoop {
           skipReason = 'NO_SIGNAL';
       }
 
-      // 5. Execution Logic
+      // 6. Execution Logic
       const cooldown = run.params?.cooldown || DEFAULTS.DEFAULT_COOLDOWN_MS;
       const now = Date.now();
       const onCooldown = (now - this.lastTradeTime) < cooldown;
@@ -183,7 +206,8 @@ export class MarketLoop {
           // If not an opportunity, log no change occasionally or via the generic CHECK log
       }
 
-      // 6. State Persistence (With Run ID)
+      // 7. State Persistence (With Run ID)
+      const nowTs = new Date().toISOString();
       const stateRow: MarketStateRow = {
         market_id: this.market.id,
         run_id: run.id, // Scoped
@@ -194,10 +218,11 @@ export class MarketLoop {
         direction: observation.direction,
         confidence: observation.confidence,
         exposure: this.currentExposure,
-        last_update: new Date().toISOString()
+        last_update: nowTs
       };
 
       await supabase.from('market_state').upsert(stateRow);
+      this.lastWriteTime = Date.now(); // Update write tracking
 
     } catch (err) {
       Logger.error(`Tick Error ${this.market.polymarket_market_id}`, err);

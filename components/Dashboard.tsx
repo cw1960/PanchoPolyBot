@@ -223,7 +223,8 @@ export const Dashboard: React.FC = () => {
       if (marketData) {
           await supabase.from('market_state').update({ 
               exposure: 0,
-              status: 'WATCHING' 
+              status: 'WATCHING',
+              last_update: new Date().toISOString()
            }).eq('market_id', marketData.id);
       }
 
@@ -256,7 +257,10 @@ export const Dashboard: React.FC = () => {
   };
 
   const handleResetExposure = async (marketSlug: string) => {
-      if (!marketSlug) return;
+      if (!marketSlug) {
+          alert("Please enter a Market Slug to reset.");
+          return;
+      }
       
       // FIX: Query by polymarket_market_id, NOT slug
       const { data: m } = await supabase
@@ -266,7 +270,12 @@ export const Dashboard: React.FC = () => {
         .single();
         
       if (m) {
-          await supabase.from('market_state').update({ exposure: 0 }).eq('market_id', m.id);
+          // IMPORTANT: Update last_update so the running bot detects the change
+          await supabase.from('market_state').update({ 
+              exposure: 0,
+              last_update: new Date().toISOString()
+          }).eq('market_id', m.id);
+          
           alert(`Exposure reset to $0 for ${marketSlug}`);
       } else {
           alert("Market not found in DB.");
