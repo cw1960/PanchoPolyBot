@@ -78,15 +78,57 @@ class PolymarketService {
   }
 
   /**
-   * Fetches the Best Ask price from the Order Book for Implied Probability.
+   * Calculates VWAP (Volume Weighted Average Price) for a target USD size.
+   * Walks the order book asks until size is filled.
    */
-  public async getOrderBookAsk(tokenId: string): Promise<number | null> {
+  public async getVWAPAsk(tokenId: string, targetUsdSize: number = 10): Promise<number | null> {
     if (!this.client) return null;
     try {
         const orderbook = await this.client.getOrderBook(tokenId);
-        if (orderbook.asks && orderbook.asks.length > 0) {
-            return parseFloat(orderbook.asks[0].price);
+        const asks = orderbook.asks;
+        if (!asks || asks.length === 0) return null;
+
+        let filledSize = 0;
+        let weightedSum = 0;
+        let remainingTarget = targetUsdSize;
+
+        for (const level of asks) {
+            const price = parseFloat(level.price);
+            const size = parseFloat(level.size);
+            
+            // Value of this level in USD approx (shares * price) 
+            // NOTE: Clob size is usually shares. 
+            // If we want to deploy $10, we need $10 / price shares.
+            const costOfLevel = size * price;
+
+            if (costOfLevel >= remainingTarget) {
+                // Partial fill of this level completes the order
+                const neededValue = remainingTarget;
+                weightedSum += neededValue; // Price is the weight? No.
+                // VWAP = Total Value / Total Shares
+                // We are summing Value ($). We need to track Shares.
+                
+                const sharesNeeded = remainingTarget / price;
+                filledSize += sharesNeeded;
+                remainingTarget = 0;
+                break;
+            } else {
+                // Consume full level
+                weightedSum += costOfLevel;
+                filledSize += size;
+                remainingTarget -= costOfLevel;
+            }
         }
+
+        // Check if we exhausted the book without filling size
+        if (remainingTarget > 0 && filledSize === 0) return null; // Empty book
+
+        // VWAP = (Total USD Spent) / (Total Shares Acquired)
+        const totalSpent = targetUsdSize - remainingTarget;
+        if (filledSize === 0) return parseFloat(asks[0].price); // Fallback
+
+        return totalSpent / filledSize;
+        
     } catch (err) {
         // Suppress 404s/empty books
     }

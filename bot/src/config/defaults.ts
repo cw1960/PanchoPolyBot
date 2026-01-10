@@ -1,3 +1,4 @@
+
 /**
  * config/defaults.ts
  * 
@@ -11,4 +12,5 @@ export const DEFAULTS = {
   SYNC_INTERVAL_MS: 5000,     // How often to sync config from Supabase
   MAX_RETRIES: 3,             // Network retry limit
   DEFAULT_BET_SIZE: 10,       // Safe default bet size in USDC
+  DEFAULT_COOLDOWN_MS: 15000, // Increased to 15s per feedback
 };

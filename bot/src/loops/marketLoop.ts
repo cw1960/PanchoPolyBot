@@ -2,6 +2,7 @@
 import { Market, MarketStateRow } from '../types/tables';
 import { Logger } from '../utils/logger';
 import { ENV } from '../config/env';
+import { DEFAULTS } from '../config/defaults';
 import { EdgeEngine } from '../services/edgeEngine';
 import { executionService } from '../services/execution';
 import { supabase } from '../services/supabase';
@@ -14,11 +15,15 @@ export class MarketLoop {
   private currentExposure: number = 0; 
   private lastRunId: string | undefined = undefined;
   
-  // STABILITY & PACING
-  private stabilityCounter: number = 0;
-  private lastDirection: 'UP' | 'DOWN' | 'NEUTRAL' = 'NEUTRAL';
-  private readonly STABILITY_THRESHOLD = 3; 
-  private lastTradeTime: number = 0; // For Cooldown
+  // ROLLING STATE
+  private priceHistory: { price: number, time: number }[] = [];
+  private signalHistory: boolean[] = []; // true = high confidence hit
+  private lastTradeTime: number = 0; 
+  
+  // CONSTANTS
+  private readonly STABILITY_WINDOW = 10; // M ticks
+  private readonly STABILITY_REQUIRED = 7; // K hits
+  private readonly HISTORY_WINDOW_MS = 60000; // 60s for vol calc
 
   constructor(market: Market) {
     this.market = market;
@@ -64,43 +69,58 @@ export class MarketLoop {
     // Reset on new run
     if (this.lastRunId !== run.id) {
         this.currentExposure = 0;
-        this.stabilityCounter = 0;
+        this.signalHistory = [];
+        this.priceHistory = [];
         this.lastRunId = run.id;
         this.lastTradeTime = 0;
         await supabase.from('market_state').update({ exposure: 0 }).eq('market_id', this.market.id);
     }
 
     try {
-      const observation = await this.edgeEngine.observe(this.market);
+      // 1. Observe (Pass History + Trade Size)
+      const tradeSize = run.params?.tradeSize || DEFAULTS.DEFAULT_BET_SIZE;
+      
+      const observation = await this.edgeEngine.observe(
+          this.market, 
+          this.priceHistory,
+          tradeSize
+      );
+
       if (!observation) return;
 
+      // 2. Update Rolling Price History
+      this.priceHistory.push({ price: observation.spot.price, time: observation.timestamp });
+      // Prune old history > 60s
+      const cutoff = Date.now() - this.HISTORY_WINDOW_MS;
+      this.priceHistory = this.priceHistory.filter(p => p.time > cutoff);
+
+      // 3. M-of-N Stability Check
       const threshold = run.params?.confidenceThreshold || 0.6;
-      const cooldown = run.params?.cooldown || 5000;
-      
       const isHighConf = observation.confidence > threshold;
       
-      // STABILITY LOGIC: Reset if signal flickers or direction changes
-      if (isHighConf && observation.direction === this.lastDirection && observation.direction !== 'NEUTRAL') {
-          this.stabilityCounter++;
-      } else {
-          this.stabilityCounter = 0;
-          this.lastDirection = observation.direction;
+      this.signalHistory.push(isHighConf);
+      if (this.signalHistory.length > this.STABILITY_WINDOW) {
+          this.signalHistory.shift();
       }
+
+      const hitCount = this.signalHistory.filter(h => h).length;
+      const isStable = hitCount >= this.STABILITY_REQUIRED;
 
       let status: 'WATCHING' | 'OPPORTUNITY' | 'LOCKED' = 'WATCHING';
       
       if (!observation.isSafeToTrade) {
           status = 'LOCKED';
-      } else if (this.stabilityCounter >= this.STABILITY_THRESHOLD) {
+      } else if (isStable && isHighConf) { // Must be currently high conf AND stable
           status = 'OPPORTUNITY';
       }
 
-      // PACING: Check cooldown
+      // 4. PACING (Dynamic Cooldown)
+      const cooldown = run.params?.cooldown || DEFAULTS.DEFAULT_COOLDOWN_MS;
       const now = Date.now();
       const onCooldown = (now - this.lastTradeTime) < cooldown;
 
       if (status === 'OPPORTUNITY' && !onCooldown) {
-         Logger.info(`[OPPORTUNITY] ${this.market.asset} ${observation.direction} (Model: ${(observation.calculatedProbability!*100).toFixed(1)}%)`);
+         Logger.info(`[OPPORTUNITY] ${this.market.asset} ${observation.direction} (Model: ${(observation.calculatedProbability!*100).toFixed(1)}%, Stable: ${hitCount}/${this.STABILITY_WINDOW})`);
          
          const result = await executionService.attemptTrade(this.market, observation, this.currentExposure);
          
@@ -110,7 +130,7 @@ export class MarketLoop {
          }
       }
 
-      // State Persistence
+      // 5. State Persistence
       const stateRow: MarketStateRow = {
         market_id: this.market.id,
         status: status as any,

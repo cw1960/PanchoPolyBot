@@ -1,3 +1,4 @@
+
 import axios from 'axios';
 import { Logger } from '../utils/logger';
 
@@ -27,5 +28,30 @@ export class SpotPriceService {
     // Return Simple Average
     const sum = prices.reduce((a, b) => a + b, 0);
     return sum / prices.length;
+  }
+
+  /**
+   * Fetches the first trade at or after timestamp.
+   * Uses Binance AggTrades for high precision.
+   */
+  public async getHistoricalTrade(asset: string, timestampMs: number): Promise<{ price: number, time: number } | null> {
+      const sym = asset === 'ETH' ? 'ETHUSDT' : 'BTCUSDT';
+      try {
+          // fetch trades starting at timestamp
+          const url = `https://api.binance.com/api/v3/aggTrades?symbol=${sym}&startTime=${timestampMs}&limit=1`;
+          const res = await axios.get(url, { timeout: 3000 });
+          
+          if (res.data && res.data.length > 0) {
+              const trade = res.data[0];
+              // trade object: { a: aggTradeId, p: price, q: quantity, f: firstTradeId, l: lastTradeId, T: timestamp, ... }
+              return { 
+                  price: parseFloat(trade.p), 
+                  time: trade.T 
+              };
+          }
+      } catch (err) {
+          Logger.warn(`Failed to fetch historical trade for ${asset}`, err);
+      }
+      return null;
   }
 }
