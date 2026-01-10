@@ -63,14 +63,19 @@ class PolymarketService {
   }
 
   /**
-   * Fetches metadata (Start/End times) for a market slug.
+   * Fetches metadata (Start/End times, Question, Description) for a market slug.
    */
-  public async getMarketMetadata(slug: string): Promise<{ startDate: string, endDate: string } | null> {
+  public async getMarketMetadata(slug: string): Promise<{ startDate: string, endDate: string, question: string, description: string } | null> {
     try {
       const res = await axios.get(`https://gamma-api.polymarket.com/events?slug=${slug}`);
       if (!res.data || res.data.length === 0) return null;
       const market = res.data[0].markets[0];
-      return { startDate: market.startDate, endDate: market.endDate };
+      return { 
+        startDate: market.startDate, 
+        endDate: market.endDate,
+        question: market.question,
+        description: market.description
+      };
     } catch (err) {
       Logger.error(`Failed to fetch metadata for ${slug}`, err);
       return null;

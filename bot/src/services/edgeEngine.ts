@@ -1,3 +1,4 @@
+
 import { Market } from '../types/tables';
 import { ChainlinkService } from './chainlink';
 import { SpotPriceService } from './spotPrices';
@@ -23,31 +24,59 @@ export class EdgeEngine {
 
   /**
    * Hydrates market with metadata.
-   * STRICT: Uses nearest trade tick logic (1-2s tolerance)
+   * STRICT PRIORITY: 
+   * 1. Existing DB/Manual Override.
+   * 2. "Price To Beat" from Polymarket Metadata (Question/Description).
+   * 3. Nearest Trade Tick on Binance (Fallback).
    */
   public async hydrateMarket(market: Market): Promise<boolean> {
-    // 1. FAST PATH: If we already have the data (from DB or Manual Override), use it.
+    // 1. FAST PATH: If we already have the data, use it.
     if (market.t_open && market.baseline_price) return true;
 
     try {
         let updates: any = {};
 
-        // 2. Fetch Times if missing
-        if (!market.t_open || !market.t_expiry) {
+        // 2. Fetch Metadata if Times OR Baseline are missing
+        if (!market.t_open || !market.t_expiry || !market.baseline_price) {
             const meta = await polymarket.getMarketMetadata(market.polymarket_market_id);
             if (meta) {
-                market.t_open = meta.startDate;
-                market.t_expiry = meta.endDate;
-                updates.t_open = meta.startDate;
-                updates.t_expiry = meta.endDate;
-                Logger.info(`[HYDRATE] Fetched Times | Start: ${market.t_open}`);
+                // A. Update Times
+                if (!market.t_open) {
+                    market.t_open = meta.startDate;
+                    market.t_expiry = meta.endDate;
+                    updates.t_open = meta.startDate;
+                    updates.t_expiry = meta.endDate;
+                    Logger.info(`[HYDRATE] Fetched Times | Start: ${market.t_open}`);
+                }
+                
+                // B. Parse "Price To Beat" (Market Strike) from Text
+                if (!market.baseline_price) {
+                    // Look for patterns like "$90,287.65" in the question or description.
+                    // Regex: Dollar sign, digits, commas, optional decimals.
+                    const priceRegex = /\$([0-9,]+(\.[0-9]+)?)/;
+                    const match = (meta.question || '').match(priceRegex) || (meta.description || '').match(priceRegex);
+                    
+                    if (match) {
+                        const raw = match[1].replace(/,/g, '');
+                        const val = parseFloat(raw);
+                        if (!isNaN(val) && val > 0) {
+                            market.baseline_price = val;
+                            updates.baseline_price = val;
+                            Logger.info(`[HYDRATE] Found Price To Beat (Metadata): $${val}`);
+                        }
+                    }
+                }
             } else {
-                Logger.warn(`[HYDRATE] Failed to fetch metadata for ${market.polymarket_market_id}`);
-                return false; 
+                // If metadata failed, we can only proceed if we already have times (to try binance fallback)
+                if (!market.t_open) {
+                    Logger.warn(`[HYDRATE] Failed to fetch metadata for ${market.polymarket_market_id} (No Start Time)`);
+                    return false; 
+                }
             }
         }
 
-        // 3. Fetch Baseline (Nearest Trade via AggTrades)
+        // 3. Fallback: Fetch Baseline (Nearest Trade via AggTrades)
+        // Only run this if we still lack a baseline_price but have a valid t_open
         if (market.t_open && !market.baseline_price) {
             const startMs = new Date(market.t_open).getTime();
             const now = Date.now();
@@ -70,7 +99,7 @@ export class EdgeEngine {
                 if (diff <= 2000) {
                     market.baseline_price = trade.price;
                     updates.baseline_price = trade.price;
-                    Logger.info(`[HYDRATE] ${market.polymarket_market_id} Baseline: $${market.baseline_price} (Delta: ${diff}ms)`);
+                    Logger.info(`[HYDRATE] ${market.polymarket_market_id} Baseline (Binance Est): $${market.baseline_price} (Delta: ${diff}ms)`);
                 } else {
                     Logger.warn(`[HYDRATE] Baseline trade too far: ${diff}ms > 2000ms. Waiting for closer match.`);
                     return false; 
@@ -87,7 +116,9 @@ export class EdgeEngine {
             Logger.info(`[HYDRATE] Persisted metadata/baseline to DB for ${market.polymarket_market_id}`);
         }
 
-        return true;
+        // Final check: Do we have what we need?
+        return !!(market.t_open && market.baseline_price);
+        
     } catch (e: any) {
         Logger.warn(`[HYDRATE] Failed to hydrate ${market.polymarket_market_id}: ${e.message}`);
         return false;
@@ -121,7 +152,7 @@ export class EdgeEngine {
     // 3. Time Gating
     const isSafeToTrade = timeRemaining > this.NO_TRADE_ZONE_MS;
 
-    // 4. Delta 
+    // 4. Delta (Spot - Price To Beat)
     const baseline = market.baseline_price; 
     const delta = spotPrice - baseline;
     const direction = delta > 0 ? 'UP' : 'DOWN';
@@ -144,8 +175,7 @@ export class EdgeEngine {
             const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / returns.length;
             const sdTick = Math.sqrt(variance);
             
-            // Annualize to Minute (Assuming roughly 1 tick per sec? No, use timestamps)
-            // Average time delta
+            // Annualize to Minute
             const totalTime = priceHistory[priceHistory.length-1].time - priceHistory[0].time;
             const avgTimeStepSec = (totalTime / 1000) / returns.length;
             
