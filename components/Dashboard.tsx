@@ -4,7 +4,7 @@ import {
   Terminal, BarChart3, Microscope, FastForward, History,
   Settings, Database, FlaskConical, Target, TrendingUp, Filter,
   CheckCircle, XCircle, AlertTriangle, Plus, Clipboard, Power, RefreshCw,
-  BrainCircuit, FileText, Search, ArrowRight, Download, RefreshCcw, Info, Trash2, Edit2
+  BrainCircuit, FileText, Search, ArrowRight, Download, RefreshCcw, Info, Trash2, Edit2, AlertCircle
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -162,7 +162,10 @@ export const Dashboard: React.FC = () => {
     if (error) {
         console.error("Error fetching trades:", error);
     }
-    if (data) setTrades(data);
+    if (data) {
+        // console.log(`Fetched ${data.length} trades`);
+        setTrades(data);
+    }
   };
 
   // --- ACTIONS ---
@@ -825,35 +828,46 @@ export const Dashboard: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody className="font-mono text-xs">
-                      {trades.map(trade => (
-                        <tr key={trade.id} className="border-b border-zinc-900 hover:bg-zinc-900/30 transition-colors">
-                          <td className="p-3 text-zinc-500">{new Date(trade.created_at).toLocaleTimeString()}</td>
-                          <td className="p-3 text-white font-bold">{trade.asset}</td>
-                          <td className={`p-3 font-bold ${trade.side === 'UP' ? 'text-emerald-400' : 'text-red-400'}`}>{trade.side}</td>
-                          <td className="p-3">
-                            <span className={`px-2 py-0.5 rounded text-[10px] ${trade.status === 'EXECUTED' ? 'bg-emerald-950 text-emerald-400' : 'bg-zinc-900 text-zinc-500'}`}>
-                              {trade.decision_reason}
-                            </span>
-                          </td>
-                          <td className="p-3 text-right">{(trade.confidence * 100).toFixed(0)}%</td>
-                          <td className={`p-3 text-right ${trade.edge_after_fees_pct > 0 ? 'text-emerald-500' : 'text-red-500'}`}>
-                            {formatPct(trade.edge_after_fees_pct / 100)}
-                          </td>
-                          <td className="p-3 text-right text-blue-400">{formatUsd(trade.ev_after_fees_usd)}</td>
-                          <td className="p-3 text-center">
-                            {trade.outcome === 'WIN' && <span className="text-emerald-500 font-bold">WIN</span>}
-                            {trade.outcome === 'LOSS' && <span className="text-red-500 font-bold">LOSS</span>}
-                            {trade.outcome === 'OPEN' && <span className="text-zinc-600">-</span>}
-                          </td>
-                          <td className="p-3 text-right">
-                            {trade.status === 'EXECUTED' && trade.outcome === 'OPEN' && (
-                              <button onClick={() => simulateOutcome(trade)} className="text-[10px] bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded text-zinc-300">
-                                Simulate
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
+                      {trades.length === 0 ? (
+                          <tr>
+                              <td colSpan={9} className="p-12 text-center text-zinc-600">
+                                  <div className="flex flex-col items-center gap-2">
+                                      <AlertCircle size={32} />
+                                      <span>No trades found for this run configuration.</span>
+                                  </div>
+                              </td>
+                          </tr>
+                      ) : (
+                          trades.map(trade => (
+                            <tr key={trade.id} className="border-b border-zinc-900 hover:bg-zinc-900/30 transition-colors">
+                              <td className="p-3 text-zinc-500">{trade.created_at ? new Date(trade.created_at).toLocaleTimeString() : '---'}</td>
+                              <td className="p-3 text-white font-bold">{trade.asset}</td>
+                              <td className={`p-3 font-bold ${trade.side === 'UP' ? 'text-emerald-400' : 'text-red-400'}`}>{trade.side}</td>
+                              <td className="p-3">
+                                <span className={`px-2 py-0.5 rounded text-[10px] ${trade.status === 'EXECUTED' ? 'bg-emerald-950 text-emerald-400' : 'bg-zinc-900 text-zinc-500'}`}>
+                                  {trade.decision_reason}
+                                </span>
+                              </td>
+                              <td className="p-3 text-right">{(trade.confidence * 100).toFixed(0)}%</td>
+                              <td className={`p-3 text-right ${trade.edge_after_fees_pct > 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                                {formatPct(trade.edge_after_fees_pct / 100)}
+                              </td>
+                              <td className="p-3 text-right text-blue-400">{formatUsd(trade.ev_after_fees_usd)}</td>
+                              <td className="p-3 text-center">
+                                {trade.outcome === 'WIN' && <span className="text-emerald-500 font-bold">WIN</span>}
+                                {trade.outcome === 'LOSS' && <span className="text-red-500 font-bold">LOSS</span>}
+                                {trade.outcome === 'OPEN' && <span className="text-zinc-600">-</span>}
+                              </td>
+                              <td className="p-3 text-right">
+                                {trade.status === 'EXECUTED' && trade.outcome === 'OPEN' && (
+                                  <button onClick={() => simulateOutcome(trade)} className="text-[10px] bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded text-zinc-300">
+                                    Simulate
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          ))
+                      )}
                     </tbody>
                 </table>
               </div>

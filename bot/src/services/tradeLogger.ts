@@ -1,4 +1,3 @@
-
 import { supabase } from './supabase';
 import { Logger } from '../utils/logger';
 import { TradeEventRow } from '../types/tables';
@@ -37,7 +36,9 @@ export class TradeLogger {
            Logger.error('DB_LOG_FAIL', error);
         } else {
            // Success feedback for debugging
-           // console.log(`[DB] Logged: ${event.decision_reason}`); 
+           if (event.status === 'EXECUTED') {
+               Logger.info(`[DB] SUCCESS: Logged Execution ${event.asset} (${event.side})`);
+           }
         }
       } catch (err) {
         Logger.error('TradeLogger: Unexpected error', err);

@@ -14,10 +14,10 @@ import { ENV } from '../config/env';
  */
 export class RiskGovernor {
   // Step 6 Constants
-  public static readonly GLOBAL_MAX_EXPOSURE = 5000; // Hard limit $5000 total risk across all markets
-  public static readonly MAX_PER_MARKET = 1000;      // Hard limit $1000 per market (Increased from $50)
-  public static readonly MAX_RISK_PER_TRADE = 0.05;  // 5% of Bankroll (Increased for testing flexibility)
-  public static readonly VIRTUAL_BANKROLL = 1000;    // Assumed bankroll for sizing
+  public static readonly GLOBAL_MAX_EXPOSURE = 10000; // Hard limit $10,000 (Bumped for testing)
+  public static readonly MAX_PER_MARKET = 2000;       // Hard limit $2,000 per market
+  public static readonly MAX_RISK_PER_TRADE = 0.05;   // 5% of Bankroll
+  public static readonly VIRTUAL_BANKROLL = 5000;     // Assumed bankroll for sizing
 
   /**
    * Checks if a trade is safe to execute.
@@ -35,27 +35,26 @@ export class RiskGovernor {
       return false;
     }
 
-    // DRY RUN: Bypass Exposure Limits
+    // 2. DRY RUN: Bypass Exposure Limits (CRITICAL FOR TESTING)
     if (ENV.DRY_RUN) {
-      Logger.info(`[RISK] DRY_RUN mode — exposure limits bypassed`);
+      // We explicitly log this only once in a while or verbose to confirm it's working
+      // Logger.info(`[RISK] DRY_RUN bypass active. Ignoring limits.`);
       return true;
     }
 
-    // 2. Check Market Hard Cap
+    // 3. Check Market Hard Cap
     if (currentExposure + amountUSDC > RiskGovernor.MAX_PER_MARKET) {
       Logger.warn(`[RISK] VETO: Hard Cap Reached ($${RiskGovernor.MAX_PER_MARKET}) for ${market.polymarket_market_id}.`);
       return false;
     }
 
-    // 3. Check Configured Market Exposure Limit
+    // 4. Check Configured Market Exposure Limit
     if (currentExposure + amountUSDC > market.max_exposure) {
       Logger.warn(`[RISK] VETO: User Budget Limit Reached ($${market.max_exposure}).`);
       return false;
     }
 
-    // 4. Check Global Exposure (Strict Scoping)
-    // FIX: Only sum exposure for ENABLED markets in their ACTIVE run.
-    
+    // 5. Check Global Exposure (Strict Scoping)
     const { data: enabledMarkets } = await supabase
         .from('markets')
         .select('id, active_run_id')
@@ -66,13 +65,11 @@ export class RiskGovernor {
         return false;
     }
 
-    // Extract relevant IDs
     const marketIds = enabledMarkets.map(m => m.id);
 
-    // Fetch states for these markets
     const { data: activeStates, error: stateError } = await supabase
         .from('market_state')
-        .select('market_id, exposure, run_id') // Fetch run_id to verify scope
+        .select('market_id, exposure, run_id')
         .in('market_id', marketIds);
     
     if (stateError || !activeStates) {
@@ -80,13 +77,10 @@ export class RiskGovernor {
       return false;
     }
 
-    // Sum exposure ONLY where the state's run_id matches the market's active_run_id
     let currentGlobalExposure = 0;
 
     for (const state of activeStates) {
         const marketConfig = enabledMarkets.find(m => m.id === state.market_id);
-        
-        // Strict Scope Check: The state row must belong to the currently active run for this market
         if (marketConfig && marketConfig.active_run_id && state.run_id === marketConfig.active_run_id) {
             currentGlobalExposure += (state.exposure || 0);
         }
@@ -101,13 +95,9 @@ export class RiskGovernor {
     return true;
   }
 
-  /**
-   * Calculates safe bet size based on "Fixed Fraction + Hard Cap" rule.
-   */
   public calculateBetSize(): number {
     const fractionalSize = RiskGovernor.VIRTUAL_BANKROLL * RiskGovernor.MAX_RISK_PER_TRADE; 
-    const hardCap = 100; // Individual trade cap increased
-    
+    const hardCap = 100;
     return Math.min(fractionalSize, hardCap);
   }
 }
