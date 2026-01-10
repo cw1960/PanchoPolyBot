@@ -650,7 +650,7 @@ export const Dashboard: React.FC = () => {
                                 </div>
                                 {/* Tooltip */}
                                 <div className="absolute bottom-full left-0 mb-2 w-48 bg-black border border-zinc-700 p-2 rounded text-[10px] text-zinc-400 hidden group-hover:block z-50 shadow-lg">
-                                  Total amount the bot is allowed to spend. The bot stops trading when Used >= Max.
+                                  Total amount the bot is allowed to spend. The bot stops trading when Used &gt;= Max.
                                 </div>
                             </div>
 
