@@ -4,6 +4,7 @@ import { SpotPriceService } from './spotPrices';
 import { MarketObservation } from '../types/marketEdge';
 import { Logger } from '../utils/logger';
 import { polymarket } from './polymarket';
+import { supabase } from './supabase';
 
 export class EdgeEngine {
   private chainlink: ChainlinkService;
@@ -25,15 +26,20 @@ export class EdgeEngine {
    * STRICT: Uses nearest trade tick logic (1-2s tolerance)
    */
   public async hydrateMarket(market: Market): Promise<boolean> {
+    // 1. FAST PATH: If we already have the data (from DB or Manual Override), use it.
     if (market.t_open && market.baseline_price) return true;
 
     try {
-        // 1. Fetch Times
+        let updates: any = {};
+
+        // 2. Fetch Times if missing
         if (!market.t_open || !market.t_expiry) {
             const meta = await polymarket.getMarketMetadata(market.polymarket_market_id);
             if (meta) {
                 market.t_open = meta.startDate;
                 market.t_expiry = meta.endDate;
+                updates.t_open = meta.startDate;
+                updates.t_expiry = meta.endDate;
                 Logger.info(`[HYDRATE] Fetched Times | Start: ${market.t_open}`);
             } else {
                 Logger.warn(`[HYDRATE] Failed to fetch metadata for ${market.polymarket_market_id}`);
@@ -41,7 +47,7 @@ export class EdgeEngine {
             }
         }
 
-        // 2. Fetch Baseline (Nearest Trade via AggTrades)
+        // 3. Fetch Baseline (Nearest Trade via AggTrades)
         if (market.t_open && !market.baseline_price) {
             const startMs = new Date(market.t_open).getTime();
             const now = Date.now();
@@ -63,6 +69,7 @@ export class EdgeEngine {
                 const diff = Math.abs(trade.time - startMs);
                 if (diff <= 2000) {
                     market.baseline_price = trade.price;
+                    updates.baseline_price = trade.price;
                     Logger.info(`[HYDRATE] ${market.polymarket_market_id} Baseline: $${market.baseline_price} (Delta: ${diff}ms)`);
                 } else {
                     Logger.warn(`[HYDRATE] Baseline trade too far: ${diff}ms > 2000ms. Waiting for closer match.`);
@@ -73,6 +80,13 @@ export class EdgeEngine {
                 return false;
             }
         }
+
+        // 4. PERSISTENCE: Save any found data to DB so we don't have to fetch again
+        if (Object.keys(updates).length > 0) {
+            await supabase.from('markets').update(updates).eq('id', market.id);
+            Logger.info(`[HYDRATE] Persisted metadata/baseline to DB for ${market.polymarket_market_id}`);
+        }
+
         return true;
     } catch (e: any) {
         Logger.warn(`[HYDRATE] Failed to hydrate ${market.polymarket_market_id}: ${e.message}`);

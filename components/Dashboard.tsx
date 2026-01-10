@@ -4,7 +4,7 @@ import {
   Terminal, BarChart3, Microscope, FastForward, History,
   Settings, Database, FlaskConical, Target, TrendingUp, Filter,
   CheckCircle, XCircle, AlertTriangle, Plus, Clipboard, Power, RefreshCw,
-  BrainCircuit, FileText, Search, ArrowRight, Download, RefreshCcw, Info, Trash2
+  BrainCircuit, FileText, Search, ArrowRight, Download, RefreshCcw, Info, Trash2, Edit2
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -138,6 +138,7 @@ export const Dashboard: React.FC = () => {
   }
 
   const fetchEnabledMarkets = async () => {
+    // Fetches baseline_price now for display
     const { data } = await supabase.from('markets').select('*').eq('enabled', true);
     if (data) setEnabledMarkets(data);
   };
@@ -273,6 +274,18 @@ export const Dashboard: React.FC = () => {
           alert("Market Disabled. Bot will remove it on next tick.");
       } else {
           alert("Error disabling market: " + error.message);
+      }
+  };
+  
+  const handleManualBaseline = async (marketId: string, currentVal: number | null) => {
+      const val = prompt("Enter Manual Baseline Price (Warning: Overrides Bot Data)", currentVal ? currentVal.toString() : "");
+      if (val) {
+          const num = parseFloat(val);
+          if (!isNaN(num)) {
+              await supabase.from('markets').update({ baseline_price: num }).eq('id', marketId);
+              fetchEnabledMarkets();
+              alert("Baseline Price Updated. Bot should pick this up on next tick.");
+          }
       }
   };
 
@@ -458,22 +471,40 @@ export const Dashboard: React.FC = () => {
                   <div className="text-xs text-zinc-500 uppercase mb-1">Active Engines</div>
                   <div className="text-2xl font-mono font-bold text-white mb-2">{enabledMarkets.length}</div>
                   
-                  <div className="space-y-1 w-full flex flex-col items-end">
+                  <div className="space-y-2 w-full flex flex-col items-end">
                       {enabledMarkets.map(m => (
-                          <div key={m.id} className="flex items-center gap-2 bg-zinc-950/50 px-2 py-1 rounded border border-zinc-800 group">
-                              <span className="text-[10px] text-emerald-500 font-mono">
-                                  {m.asset || 'UNK'}
-                              </span>
-                              <span className="text-[10px] text-zinc-400 max-w-[80px] truncate" title={m.polymarket_market_id}>
-                                  {m.polymarket_market_id}
-                              </span>
-                              <button 
-                                  onClick={() => handleKillMarket(m.id)}
-                                  className="text-zinc-600 hover:text-red-500 transition-colors"
-                                  title="Force Disable Market"
-                              >
-                                  <XCircle size={12} />
-                              </button>
+                          <div key={m.id} className="w-full bg-zinc-950/50 p-2 rounded border border-zinc-800 flex flex-col gap-2">
+                              <div className="flex justify-between items-center">
+                                  <span className="text-[10px] text-emerald-500 font-mono font-bold">
+                                      {m.asset || 'UNK'}
+                                  </span>
+                                  <button 
+                                      onClick={() => handleKillMarket(m.id)}
+                                      className="text-zinc-600 hover:text-red-500 transition-colors"
+                                      title="Force Disable Market"
+                                  >
+                                      <XCircle size={12} />
+                                  </button>
+                              </div>
+                              <div className="flex justify-between items-center bg-zinc-900/50 p-1 rounded">
+                                   {m.baseline_price ? (
+                                       <span className="text-[10px] text-zinc-400 font-mono">
+                                          Ref: ${m.baseline_price.toFixed(2)}
+                                       </span>
+                                   ) : (
+                                       <button 
+                                          onClick={() => handleManualBaseline(m.id, null)}
+                                          className="text-[10px] bg-red-900/20 text-red-400 border border-red-900/50 px-2 py-0.5 rounded hover:bg-red-900/40 animate-pulse"
+                                       >
+                                          MISSING BASELINE
+                                       </button>
+                                   )}
+                                   {m.baseline_price && (
+                                       <button onClick={() => handleManualBaseline(m.id, m.baseline_price)}>
+                                          <Edit2 size={10} className="text-zinc-600 hover:text-white" />
+                                       </button>
+                                   )}
+                              </div>
                           </div>
                       ))}
                   </div>
