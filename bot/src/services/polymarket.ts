@@ -145,6 +145,35 @@ class PolymarketService {
   }
 
   /**
+   * Calculates Mid Price ((Best Bid + Best Ask) / 2) for PnL Marking.
+   */
+  public async getMidPrice(tokenId: string): Promise<number | null> {
+    if (!this.client) return null;
+    try {
+        const book = await this.client.getOrderBook(tokenId);
+        
+        let bestAsk: number | undefined;
+        let bestBid: number | undefined;
+
+        if (book.asks.length > 0) bestAsk = parseFloat(book.asks[0].price);
+        if (book.bids.length > 0) bestBid = parseFloat(book.bids[0].price);
+
+        if (bestAsk !== undefined && bestBid !== undefined) {
+            return (bestAsk + bestBid) / 2;
+        } else if (bestAsk !== undefined) {
+            return bestAsk;
+        } else if (bestBid !== undefined) {
+            return bestBid;
+        }
+        
+        return null;
+    } catch (e) {
+        // Quietly fail for PnL marks to avoid log spam
+        return null;
+    }
+  }
+
+  /**
    * Executes a Limit Order (GTC)
    */
   public async placeOrder(tokenId: string, side: 'BUY' | 'SELL', price: number, size: number) {

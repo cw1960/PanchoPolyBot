@@ -1,3 +1,4 @@
+
 import { Market, MarketStateRow } from '../types/tables';
 import { Logger } from '../utils/logger';
 import { ENV } from '../config/env';
@@ -5,6 +6,8 @@ import { DEFAULTS } from '../config/defaults';
 import { EdgeEngine } from '../services/edgeEngine';
 import { executionService } from '../services/execution';
 import { supabase } from '../services/supabase';
+import { polymarket } from '../services/polymarket';
+import { pnlLedger } from '../services/pnlLedger';
 
 export class MarketLoop {
   private active: boolean = false;
@@ -17,6 +20,7 @@ export class MarketLoop {
   // To handle external resets
   private lastWriteTime: number = 0;
   private lastLogTime: number = 0; // Throttle idle logs
+  private lastPnlSyncTime: number = 0; // Throttle PnL checks
   
   // ROLLING STATE
   private priceHistory: { price: number, time: number }[] = [];
@@ -27,6 +31,7 @@ export class MarketLoop {
   private readonly STABILITY_WINDOW = 10; 
   private readonly STABILITY_REQUIRED = 7; 
   private readonly HISTORY_WINDOW_MS = 60000; 
+  private readonly PNL_SYNC_INTERVAL_MS = 10000; // 10s PnL Sync
 
   constructor(market: Market) {
     this.market = market;
@@ -186,9 +191,27 @@ export class MarketLoop {
           skipReason = 'NO_SIGNAL';
       }
 
-      // 6. Execution Logic
-      const cooldown = run.params?.cooldown || DEFAULTS.DEFAULT_COOLDOWN_MS;
+      // 6. PnL Sync (Event Sourced / Mark-to-Market)
+      // Throttled to avoid rate limits
       const now = Date.now();
+      if (ENV.DRY_RUN && (now - this.lastPnlSyncTime > this.PNL_SYNC_INTERVAL_MS)) {
+           this.lastPnlSyncTime = now;
+           
+           // Fetch Mid Price for Marking
+           // We need the token IDs first
+           const tokens = await polymarket.getTokens(this.market.polymarket_market_id);
+           if (tokens && tokens.up) {
+               // Get price of 'YES' (UP) token
+               const midPriceYes = await polymarket.getMidPrice(tokens.up);
+               
+               if (midPriceYes !== null) {
+                   await pnlLedger.updateUnrealizedPnL(this.market.id, run.id, midPriceYes);
+               }
+           }
+      }
+
+      // 7. Execution Logic
+      const cooldown = run.params?.cooldown || DEFAULTS.DEFAULT_COOLDOWN_MS;
       const onCooldown = (now - this.lastTradeTime) < cooldown;
 
       if (status === 'OPPORTUNITY') {
@@ -213,7 +236,7 @@ export class MarketLoop {
          }
       } 
 
-      // 7. State Persistence (With Run ID)
+      // 8. State Persistence (With Run ID)
       const nowTs = new Date().toISOString();
       const stateRow: MarketStateRow = {
         market_id: this.market.id,

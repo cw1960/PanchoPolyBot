@@ -7,6 +7,7 @@ import { polymarket } from './polymarket';
 import { ENV } from '../config/env';
 import { feeModel } from './feeModel';
 import { TradeLogger } from './tradeLogger';
+import { pnlLedger } from './pnlLedger';
 
 export class ExecutionService {
   
@@ -140,6 +141,25 @@ export class ExecutionService {
             decision_reason: 'DRY_RUN_EXEC',
             context: { orderId: 'DRY-RUN-ID', shares, filledPrice: entryLimitPrice, mode, dry_run: true }
           });
+          
+          // NEW: RECORD LEDGER ENTRY
+          // Note: UP = YES, DOWN = NO
+          const ledgerSide = sideToBuy === 'UP' ? 'YES' : 'NO';
+          if (market.active_run_id) {
+              await pnlLedger.recordOpenTrade({
+                  run_id: market.active_run_id,
+                  market_id: market.id,
+                  polymarket_market_id: market.polymarket_market_id,
+                  mode: 'DRY_RUN',
+                  side: ledgerSide,
+                  size_usd: betSizeUSDC,
+                  entry_price: entryLimitPrice,
+                  status: 'OPEN',
+                  realized_pnl: 0,
+                  unrealized_pnl: 0,
+                  opened_at: new Date().toISOString()
+              });
+          }
 
           // DO NOT LOG EXPOSURE CONSUME
           return { executed: false, simulated: true, newExposure: currentExposure };

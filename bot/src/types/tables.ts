@@ -1,5 +1,4 @@
 
-
 export interface BotControl {
   id: number;
   desired_state: 'running' | 'stopped';
@@ -73,4 +72,22 @@ export interface TradeEventRow {
   signals?: any;
   error?: string;
   created_at?: string;
+}
+
+export interface TradeLedgerRow {
+  id?: string; // uuid, optional on insert
+  run_id: string;
+  market_id: string;
+  polymarket_market_id: string;
+  mode: 'DRY_RUN' | 'LIVE';
+  side: 'YES' | 'NO';
+  size_usd: number;
+  entry_price: number;
+  exit_price?: number;
+  status: 'OPEN' | 'CLOSED' | 'VOID';
+  realized_pnl: number;
+  unrealized_pnl: number;
+  opened_at: string;
+  closed_at?: string;
+  metadata?: any;
 }
