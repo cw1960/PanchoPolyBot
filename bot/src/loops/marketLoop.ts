@@ -43,7 +43,6 @@ export class MarketLoop {
     if (this.active) return;
     
     // Fetch initial exposure, scoped to the current run if possible
-    // Note: The tick() method handles the authoritative reset if run_id mismatches.
     await this.refreshExposure();
     
     this.active = true;
@@ -55,8 +54,6 @@ export class MarketLoop {
   }
 
   private async refreshExposure() {
-      // Safely fetch exposure from DB. 
-      // If the DB has exposure but no run_id, or wrong run_id, tick() will correct it.
       const { data } = await supabase
         .from('market_state')
         .select('exposure')
@@ -84,13 +81,12 @@ export class MarketLoop {
     // 1. Exposure Scope Enforcement & Natural Reset
     if (this.lastRunId !== run.id) {
         Logger.info(`[LOOP] New Run Detected: ${run.id}. Resetting Local State.`);
-        this.currentExposure = 0; // Natural Reset
+        this.currentExposure = 0; 
         this.signalHistory = [];
         this.priceHistory = [];
         this.lastRunId = run.id;
         this.lastTradeTime = 0;
         
-        // Persist clean state with new run_id
         await supabase.from('market_state').upsert({
             market_id: this.market.id,
             exposure: 0,
@@ -103,7 +99,6 @@ export class MarketLoop {
     }
 
     // 2. EXTERNAL RESET DETECTION
-    // If we have local exposure, check if the DB was reset by the UI recently.
     if (this.currentExposure > 0) {
         const { data: remoteState } = await supabase
            .from('market_state')
@@ -113,7 +108,6 @@ export class MarketLoop {
 
         if (remoteState && remoteState.last_update) {
             const remoteTime = new Date(remoteState.last_update).getTime();
-            // If remote exposure is 0 AND the update happened AFTER our last write
             if (remoteState.exposure === 0 && remoteTime > this.lastWriteTime) {
                 Logger.info(`[LOOP] External Exposure Reset Detected. Local: ${this.currentExposure} -> 0`);
                 this.currentExposure = 0;
@@ -121,15 +115,14 @@ export class MarketLoop {
         }
     }
 
-    // 3. Invariant Guardrail: Exposure Hallucination Check
-    // If we think we have exposure, verify against the Ledger (trade_events)
+    // 3. Invariant Guardrail
     if (this.currentExposure > 0) {
        const { count, error } = await supabase
         .from('trade_events')
         .select('*', { count: 'exact', head: true })
         .eq('test_run_id', run.id)
         .eq('market_id', this.market.id)
-        .eq('status', 'EXECUTED'); // Only count actual executions
+        .eq('status', 'EXECUTED'); 
 
        if (!error && count === 0) {
            Logger.error(`[EXPOSURE_BUG] INVARIANT VIOLATED! Local exposure ${this.currentExposure} but 0 trades in DB for run ${run.id}. Halting.`);
@@ -138,15 +131,8 @@ export class MarketLoop {
        }
     }
 
-    // 4. Log Exposure Check
-    const max = run.params?.maxExposure || this.market.max_exposure || 50;
-    // Removed verbose exposure log to reduce noise, unless near cap
-    if (this.currentExposure > (max * 0.8)) {
-        Logger.warn(`[EXPOSURE_WARN] Market: ${this.market.polymarket_market_id} | Used: $${this.currentExposure} / $${max}`);
-    }
-
     try {
-      // 5. Observe
+      // 4. Observe
       const tradeSize = run.params?.tradeSize || DEFAULTS.DEFAULT_BET_SIZE;
       const observation = await this.edgeEngine.observe(
           this.market, 
@@ -154,8 +140,34 @@ export class MarketLoop {
           tradeSize
       );
 
+      // 5. Check Expiration / Settlement (DRY RUN ONLY)
+      if (this.market.t_expiry) {
+          const expiryTime = new Date(this.market.t_expiry).getTime();
+          if (Date.now() >= expiryTime) {
+             Logger.info(`[LOOP] Market Expired: ${this.market.polymarket_market_id}`);
+             
+             if (ENV.DRY_RUN && run) {
+                 // Determine Settlement Price
+                 // 1. Try Implied (Book)
+                 // 2. Try Calculated (Model)
+                 // 3. Default 0.5 (Unresolved/Coinflip)
+                 let settlePrice = 0.5;
+                 if (observation && observation.impliedProbability > 0) {
+                     settlePrice = observation.impliedProbability;
+                 } else if (observation && observation.calculatedProbability > 0) {
+                     settlePrice = observation.calculatedProbability;
+                 }
+                 
+                 Logger.info(`[LOOP] Triggering Settlement @ ${settlePrice.toFixed(2)}`);
+                 await pnlLedger.settleMarket(this.market.id, run.id, settlePrice);
+             }
+             
+             this.stop();
+             return;
+          }
+      }
+
       if (!observation) {
-          // Verbose "Waiting" Log every ~10 seconds
           const now = Date.now();
           if (now - this.lastLogTime > 10000) {
               Logger.info(`[LOOP] Waiting for Data/Hydration... (${this.market.polymarket_market_id})`);
@@ -180,30 +192,20 @@ export class MarketLoop {
       const isStable = hitCount >= this.STABILITY_REQUIRED;
 
       let status: 'WATCHING' | 'OPPORTUNITY' | 'LOCKED' = 'WATCHING';
-      let skipReason = '';
 
       if (!observation.isSafeToTrade) {
           status = 'LOCKED';
-          skipReason = 'NO_TRADE_ZONE';
       } else if (isStable && isHighConf) {
           status = 'OPPORTUNITY';
-      } else {
-          skipReason = 'NO_SIGNAL';
       }
 
       // 6. PnL Sync (Event Sourced / Mark-to-Market)
-      // Throttled to avoid rate limits
       const now = Date.now();
       if (ENV.DRY_RUN && (now - this.lastPnlSyncTime > this.PNL_SYNC_INTERVAL_MS)) {
            this.lastPnlSyncTime = now;
-           
-           // Fetch Mid Price for Marking
-           // We need the token IDs first
            const tokens = await polymarket.getTokens(this.market.polymarket_market_id);
            if (tokens && tokens.up) {
-               // Get price of 'YES' (UP) token
                const midPriceYes = await polymarket.getMidPrice(tokens.up);
-               
                if (midPriceYes !== null) {
                    await pnlLedger.updateUnrealizedPnL(this.market.id, run.id, midPriceYes);
                }
@@ -217,30 +219,23 @@ export class MarketLoop {
       if (status === 'OPPORTUNITY') {
          if (!onCooldown) {
             Logger.info(`[OPPORTUNITY] ${this.market.asset} ${observation.direction} (Model: ${(observation.calculatedProbability!*100).toFixed(1)}%)`);
-            
-            // ATTEMPT TRADE
-            // Note: attemptTrade returns the new exposure, it does NOT mutate global state directly.
             const result = await executionService.attemptTrade(this.market, observation, this.currentExposure);
             
             if (result.executed) {
-                this.currentExposure = result.newExposure; // MUTATION POINT
+                this.currentExposure = result.newExposure; 
                 this.lastTradeTime = now;
             } else if (result.simulated) {
                 Logger.info(`[DRY_RUN] Simulated trade — exposure unchanged`);
-                this.lastTradeTime = now; // Respect cooldown
-            } else {
-                Logger.info(`[EXEC_SKIP] Trade Skipped`);
+                this.lastTradeTime = now; 
             }
-         } else {
-             // Logger.info(`[COOLDOWN] Waiting...`);
          }
       } 
 
-      // 8. State Persistence (With Run ID)
+      // 8. State Persistence
       const nowTs = new Date().toISOString();
       const stateRow: MarketStateRow = {
         market_id: this.market.id,
-        run_id: run.id, // Scoped
+        run_id: run.id,
         status: status as any,
         chainlink_price: observation.chainlink.price,
         spot_price_median: observation.spot.price,
@@ -252,7 +247,7 @@ export class MarketLoop {
       };
 
       await supabase.from('market_state').upsert(stateRow);
-      this.lastWriteTime = Date.now(); // Update write tracking
+      this.lastWriteTime = Date.now(); 
 
     } catch (err) {
       Logger.error(`Tick Error ${this.market.polymarket_market_id}`, err);
