@@ -155,23 +155,36 @@ export class MarketLoop {
                  let settlePrice = 0.5;
                  let source = 'UNKNOWN';
 
-                 // Strategy 1: Use Last Known Market Mid (Simulate "Selling at Close")
-                 if (observation && observation.impliedProbability > 0) {
-                     settlePrice = observation.impliedProbability;
-                     source = 'LAST_MID_PRICE';
-                 } 
-                 // Strategy 2: Use Model Probability
-                 else if (observation && observation.calculatedProbability > 0) {
-                     settlePrice = observation.calculatedProbability;
-                     source = 'MODEL_PROBABILITY';
+                 // Strategy 1: Explicitly Fetch Mid Price of YES Token
+                 // This avoids ambiguity with 'direction' or 'impliedProbability' of the losing side.
+                 try {
+                     const tokens = await polymarket.getTokens(this.market.polymarket_market_id);
+                     if (tokens && tokens.up) {
+                         const mid = await polymarket.getMidPrice(tokens.up);
+                         if (mid !== null) {
+                             settlePrice = mid;
+                             source = 'POLYMARKET_MID_YES';
+                         }
+                     }
+                 } catch (settleErr) {
+                     Logger.warn(`[SETTLE] Failed to fetch final mid price`, settleErr);
                  }
-                 // Strategy 3: Theoretical Outcome based on Delta (Strict Binary 0 or 1)
-                 else if (observation && observation.delta !== 0) {
-                     settlePrice = observation.delta > 0 ? 1.0 : 0.0;
-                     source = 'THEORETICAL_DELTA';
+
+                 // Strategy 2: Fallback to Model Probability (P(UP))
+                 if (source === 'UNKNOWN' && observation) {
+                     if (observation.calculatedProbability > 0) {
+                         settlePrice = observation.calculatedProbability;
+                         source = 'MODEL_PROBABILITY';
+                     }
+                     // Strategy 3: Theoretical Outcome based on Delta
+                     else if (observation.delta !== 0) {
+                         settlePrice = observation.delta > 0 ? 1.0 : 0.0;
+                         source = 'THEORETICAL_DELTA';
+                     }
                  }
-                 // Strategy 4: Fallback
-                 else {
+
+                 // Strategy 4: Ultimate Fallback
+                 if (source === 'UNKNOWN') {
                      settlePrice = 0.5;
                      source = 'FALLBACK_COINFLIP';
                  }
