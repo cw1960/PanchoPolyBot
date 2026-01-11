@@ -66,8 +66,9 @@ export class PnLLedgerService {
     /**
      * Settles all OPEN trades for a market upon expiration (DRY_RUN).
      * Calculates final Realized PnL based on the settlement price.
+     * IDEMPOTENT: Only affects trades with status='OPEN'.
      */
-    public async settleMarket(marketId: string, runId: string, finalPriceYes: number) {
+    public async settleMarket(marketId: string, runId: string, finalPriceYes: number, source: string = 'UNKNOWN') {
         // 1. Fetch OPEN trades
         const { data: trades, error } = await supabase
             .from('trade_ledger')
@@ -76,9 +77,17 @@ export class PnLLedgerService {
             .eq('market_id', marketId)
             .eq('status', 'OPEN');
 
-        if (error || !trades || trades.length === 0) return;
+        if (error) {
+            Logger.error(`[PNL] Settlement fetch failed for ${marketId}`, error);
+            return;
+        }
 
-        Logger.info(`[PNL] Settling ${trades.length} trades for ${marketId} @ ${finalPriceYes.toFixed(3)}`);
+        if (!trades || trades.length === 0) {
+            // No open trades to settle. This is fine/expected on subsequent calls.
+            return;
+        }
+
+        Logger.info(`[PNL_SETTLE] Closing ${trades.length} trades. Market=${marketId} Price=${finalPriceYes.toFixed(3)} Source=${source}`);
 
         // 2. Close each trade
         for (const trade of trades) {
@@ -102,10 +111,12 @@ export class PnLLedgerService {
                     metadata: {
                         ...(trade.metadata || {}),
                         settlement_reason: 'EXPIRY',
+                        settlement_source: source,
                         final_mark_price: finalPriceYes
                     }
                 })
-                .eq('id', trade.id);
+                .eq('id', trade.id)
+                .eq('status', 'OPEN'); // Double-check safety
         }
     }
 }

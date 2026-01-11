@@ -65,8 +65,11 @@ export class MarketLoop {
   public stop() {
     if (!this.active) return;
     this.active = false;
-    if (this.intervalId) clearInterval(this.intervalId);
-    Logger.info(`Stopped Loop: ${this.market.polymarket_market_id}`);
+    if (this.intervalId) {
+        clearInterval(this.intervalId);
+        this.intervalId = null;
+    }
+    Logger.info(`[LOOP_STOP] Stopped Market Loop: ${this.market.polymarket_market_id}`);
   }
 
   public updateConfig(newConfig: Market) {
@@ -141,27 +144,42 @@ export class MarketLoop {
       );
 
       // 5. Check Expiration / Settlement (DRY RUN ONLY)
+      // We check expiry BEFORE observation null check because we might need to settle even if data is missing
       if (this.market.t_expiry) {
           const expiryTime = new Date(this.market.t_expiry).getTime();
           if (Date.now() >= expiryTime) {
-             Logger.info(`[LOOP] Market Expired: ${this.market.polymarket_market_id}`);
+             Logger.info(`[LOOP_EXPIRY] Market Expired: ${this.market.polymarket_market_id}`);
              
              if (ENV.DRY_RUN && run) {
-                 // Determine Settlement Price
-                 // 1. Try Implied (Book)
-                 // 2. Try Calculated (Model)
-                 // 3. Default 0.5 (Unresolved/Coinflip)
+                 // DETERMINISTIC SETTLEMENT LOGIC
                  let settlePrice = 0.5;
+                 let source = 'UNKNOWN';
+
+                 // Strategy 1: Use Last Known Market Mid (Simulate "Selling at Close")
                  if (observation && observation.impliedProbability > 0) {
                      settlePrice = observation.impliedProbability;
-                 } else if (observation && observation.calculatedProbability > 0) {
+                     source = 'LAST_MID_PRICE';
+                 } 
+                 // Strategy 2: Use Model Probability
+                 else if (observation && observation.calculatedProbability > 0) {
                      settlePrice = observation.calculatedProbability;
+                     source = 'MODEL_PROBABILITY';
+                 }
+                 // Strategy 3: Theoretical Outcome based on Delta (Strict Binary 0 or 1)
+                 else if (observation && observation.delta !== 0) {
+                     settlePrice = observation.delta > 0 ? 1.0 : 0.0;
+                     source = 'THEORETICAL_DELTA';
+                 }
+                 // Strategy 4: Fallback
+                 else {
+                     settlePrice = 0.5;
+                     source = 'FALLBACK_COINFLIP';
                  }
                  
-                 Logger.info(`[LOOP] Triggering Settlement @ ${settlePrice.toFixed(2)}`);
-                 await pnlLedger.settleMarket(this.market.id, run.id, settlePrice);
+                 await pnlLedger.settleMarket(this.market.id, run.id, settlePrice, source);
              }
              
+             // CRITICAL: Stop loop to prevent zombie processing
              this.stop();
              return;
           }
