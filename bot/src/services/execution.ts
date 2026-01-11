@@ -51,7 +51,8 @@ export class ExecutionService {
         implied_probability: obs.impliedProbability,
         model_probability: obs.calculatedProbability,
         z_score: obs.calculatedProbability ? (obs.calculatedProbability - 0.5) * 2 : 0, 
-        direction: obs.direction
+        direction: obs.direction,
+        regime: obs.regime
     };
 
     const eventPayload: TradeEventRow = {
@@ -157,7 +158,14 @@ export class ExecutionService {
                   status: 'OPEN',
                   realized_pnl: 0,
                   unrealized_pnl: 0,
-                  opened_at: new Date().toISOString()
+                  opened_at: new Date().toISOString(),
+                  // METADATA INJECTION FOR AI ANALYSIS
+                  metadata: {
+                      confidence: obs.confidence,
+                      regime: obs.regime,
+                      delta: obs.delta,
+                      implied_prob: obs.impliedProbability
+                  }
               });
           }
 

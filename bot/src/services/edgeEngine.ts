@@ -16,6 +16,10 @@ export class EdgeEngine {
   // Safety Clips for Realized Volatility
   private readonly MIN_REALIZED_VOL = 0.0005; // 0.05% per min
   private readonly MAX_REALIZED_VOL = 0.02;   // 2.0% per min (Panic mode clip)
+  
+  // Regime Thresholds (per minute volatility)
+  private readonly REGIME_LOW_VOL = 0.001;  // 0.1%
+  private readonly REGIME_HIGH_VOL = 0.005; // 0.5%
 
   constructor() {
     this.chainlink = new ChainlinkService();
@@ -172,6 +176,7 @@ export class EdgeEngine {
 
     // 5. Realized Volatility Calculation (Rolling Window)
     let realizedVolPerMin = this.MIN_REALIZED_VOL;
+    let regime: 'LOW_VOL' | 'NORMAL' | 'HIGH_VOL' = 'NORMAL';
     
     if (priceHistory.length > 5) {
         // Calculate Log Returns
@@ -199,6 +204,10 @@ export class EdgeEngine {
             }
         }
     }
+    
+    // Determine Regime
+    if (realizedVolPerMin < this.REGIME_LOW_VOL) regime = 'LOW_VOL';
+    else if (realizedVolPerMin > this.REGIME_HIGH_VOL) regime = 'HIGH_VOL';
     
     // Clamp Vol
     realizedVolPerMin = Math.max(this.MIN_REALIZED_VOL, Math.min(this.MAX_REALIZED_VOL, realizedVolPerMin));
@@ -243,7 +252,8 @@ export class EdgeEngine {
       calculatedProbability, 
       impliedProbability,
       timeToExpiryMs: timeRemaining,
-      isSafeToTrade
+      isSafeToTrade,
+      regime
     };
   }
 

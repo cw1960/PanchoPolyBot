@@ -21,4 +21,7 @@ export interface MarketObservation {
   calculatedProbability?: number; // From Gaussian Model
   timeToExpiryMs?: number;       // Remaining milliseconds
   isSafeToTrade?: boolean;       // True if outside No-Trade Zone
+  
+  // Market State Tag
+  regime: 'LOW_VOL' | 'NORMAL' | 'HIGH_VOL' | 'UNKNOWN';
 }
