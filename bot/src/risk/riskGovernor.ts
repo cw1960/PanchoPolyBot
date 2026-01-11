@@ -1,3 +1,4 @@
+
 import { Market } from '../types/tables';
 import { Logger } from '../utils/logger';
 import { supabase } from '../services/supabase';
@@ -39,7 +40,7 @@ export class RiskGovernor {
     // 2. DRY RUN: Bypass ALL Exposure Limits
     // We return immediately to avoid overhead and ensuring no cap is ever enforced.
     if (ENV.DRY_RUN) {
-      Logger.info(`[RISK] DRY_RUN mode — bypassing exposure limits (global + per-market)`);
+      Logger.info(`[RISK] DRY_RUN_BYPASS_GLOBAL_CAP`, { betSize: amountUSDC });
       return true;
     }
 
@@ -104,8 +105,13 @@ export class RiskGovernor {
     
     // Check if adding the new bet would breach the Global Max
     if (currentGlobalExposure + amountUSDC > RiskGovernor.GLOBAL_MAX_EXPOSURE) {
-      Logger.warn(`[RISK] GLOBAL_CAP_REACHED: Current $${currentGlobalExposure} + Bet $${amountUSDC} > Max $${RiskGovernor.GLOBAL_MAX_EXPOSURE}`);
-      Logger.warn(`[RISK] Contributors: ${JSON.stringify(debugContributors)}`);
+      Logger.warn(`[RISK] GLOBAL_CAP_REACHED`, {
+         mode: 'LIVE',
+         currentExposure: currentGlobalExposure,
+         betSize: amountUSDC,
+         max: RiskGovernor.GLOBAL_MAX_EXPOSURE,
+         contributors: debugContributors
+      });
       return false;
     }
     

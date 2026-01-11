@@ -92,7 +92,9 @@ export class ExecutionService {
     }
 
     // 3. EXPOSURE CHECK
-    if (currentExposure + betSizeUSDC > maxExposure) {
+    // In DRY_RUN, we bypass this local check to allow the RiskGovernor to log the bypass event.
+    // In LIVE, we strictly enforce it here.
+    if (!ENV.DRY_RUN && (currentExposure + betSizeUSDC > maxExposure)) {
       TradeLogger.log({ 
           ...eventPayload, 
           status: 'SKIPPED', 

@@ -161,7 +161,7 @@ export const Dashboard: React.FC = () => {
     }
     const { data, error } = await query;
     if (error) {
-        console.error("Error fetching trades:", error);
+        console.error("Error fetching trades:", JSON.stringify(error, null, 2));
     }
     if (data) {
         // console.log(`Fetched ${data.length} trades`);
