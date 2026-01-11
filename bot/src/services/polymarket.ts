@@ -32,10 +32,17 @@ class PolymarketService {
     }
   }
 
+  private sanitizeSlug(slug: string): string {
+      if (!slug) return '';
+      // Remove query params (?tid=...), whitespace, and trailing slashes
+      return slug.split('?')[0].trim().replace(/\/$/, '');
+  }
+
   /**
    * Resolves a Market Slug (e.g. 'btc-price-jan-1') to Token IDs (UP/DOWN)
    */
-  public async getTokens(slug: string): Promise<{ up: string; down: string } | null> {
+  public async getTokens(rawSlug: string): Promise<{ up: string; down: string } | null> {
+    const slug = this.sanitizeSlug(rawSlug);
     if (this.marketCache.has(slug)) return this.marketCache.get(slug)!;
 
     try {
@@ -65,7 +72,8 @@ class PolymarketService {
   /**
    * Fetches metadata (Start/End times, Question, Description) for a market slug.
    */
-  public async getMarketMetadata(slug: string): Promise<{ startDate: string, endDate: string, question: string, description: string } | null> {
+  public async getMarketMetadata(rawSlug: string): Promise<{ startDate: string, endDate: string, question: string, description: string } | null> {
+    const slug = this.sanitizeSlug(rawSlug);
     try {
       const res = await axios.get(`https://gamma-api.polymarket.com/events?slug=${slug}`);
       if (!res.data || res.data.length === 0) return null;
@@ -109,9 +117,7 @@ class PolymarketService {
             if (costOfLevel >= remainingTarget) {
                 // Partial fill of this level completes the order
                 const neededValue = remainingTarget;
-                weightedSum += neededValue; // Price is the weight? No.
-                // VWAP = Total Value / Total Shares
-                // We are summing Value ($). We need to track Shares.
+                weightedSum += neededValue; 
                 
                 const sharesNeeded = remainingTarget / price;
                 filledSize += sharesNeeded;
@@ -125,12 +131,10 @@ class PolymarketService {
             }
         }
 
-        // Check if we exhausted the book without filling size
-        if (remainingTarget > 0 && filledSize === 0) return null; // Empty book
+        if (remainingTarget > 0 && filledSize === 0) return null; 
 
-        // VWAP = (Total USD Spent) / (Total Shares Acquired)
         const totalSpent = targetUsdSize - remainingTarget;
-        if (filledSize === 0) return parseFloat(asks[0].price); // Fallback
+        if (filledSize === 0) return parseFloat(asks[0].price); 
 
         return totalSpent / filledSize;
         

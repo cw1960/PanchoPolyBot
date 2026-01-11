@@ -66,16 +66,29 @@ export class EdgeEngine {
                         }
                     }
                 }
-            } else {
-                // If metadata failed, we can only proceed if we already have times (to try binance fallback)
-                if (!market.t_open) {
-                    Logger.warn(`[HYDRATE] Failed to fetch metadata for ${market.polymarket_market_id} (No Start Time)`);
-                    return false; 
-                }
             }
         }
 
-        // 3. Fallback: Fetch Baseline (Nearest Trade via AggTrades)
+        // 3. FORCE HYDRATION FALLBACK (Critical Fix)
+        // If we have a manual baseline (from UI) but still no Start/End times (API failure),
+        // we MUST default them to unblock the bot.
+        if (market.baseline_price && (!market.t_open || !market.t_expiry)) {
+             Logger.warn(`[HYDRATE] Manual Baseline detected but Metadata API failed. Using DEFAULTS to unblock.`);
+             
+             const now = new Date();
+             const oneDayLater = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+             
+             if (!market.t_open) {
+                 market.t_open = now.toISOString();
+                 updates.t_open = market.t_open;
+             }
+             if (!market.t_expiry) {
+                 market.t_expiry = oneDayLater.toISOString();
+                 updates.t_expiry = market.t_expiry;
+             }
+        }
+
+        // 4. Fallback: Fetch Baseline (Nearest Trade via AggTrades)
         // Only run this if we still lack a baseline_price but have a valid t_open
         if (market.t_open && !market.baseline_price) {
             const startMs = new Date(market.t_open).getTime();
@@ -110,7 +123,7 @@ export class EdgeEngine {
             }
         }
 
-        // 4. PERSISTENCE: Save any found data to DB so we don't have to fetch again
+        // 5. PERSISTENCE: Save any found/defaulted data to DB
         if (Object.keys(updates).length > 0) {
             await supabase.from('markets').update(updates).eq('id', market.id);
             Logger.info(`[HYDRATE] Persisted metadata/baseline to DB for ${market.polymarket_market_id}`);

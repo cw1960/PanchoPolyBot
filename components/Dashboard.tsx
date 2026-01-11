@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { 
   Play, Pause, Square, Save, Activity, Shield, 
@@ -198,10 +199,13 @@ export const Dashboard: React.FC = () => {
       }
 
       // 2. Configure Market (Enable & Link)
+      // Sanitizing Slug on input
+      const cleanSlug = targetSlug.split('?')[0].trim();
+      
       let { data: marketData, error: fetchError } = await supabase
         .from('markets')
         .select('id')
-        .eq('polymarket_market_id', targetSlug)
+        .eq('polymarket_market_id', cleanSlug)
         .maybeSingle();
 
       if (fetchError) {
@@ -212,7 +216,7 @@ export const Dashboard: React.FC = () => {
       if (!marketData) {
           // Create new market entry if it doesn't exist
           const { data: newMarket, error: insertError } = await supabase.from('markets').insert({
-              polymarket_market_id: targetSlug,
+              polymarket_market_id: cleanSlug,
               asset: 'BTC', // Default fallback
               enabled: true,
               active_run_id: runData.id,
@@ -289,7 +293,8 @@ export const Dashboard: React.FC = () => {
           const num = parseFloat(val);
           if (!isNaN(num)) {
               await supabase.from('markets').update({ baseline_price: num }).eq('id', marketId);
-              fetchEnabledMarkets();
+              // Force refresh immediately to update UI
+              setTimeout(fetchEnabledMarkets, 200);
               alert("Baseline Price Updated. Bot should pick this up on next tick.");
           }
       }
@@ -313,17 +318,19 @@ export const Dashboard: React.FC = () => {
           return;
       }
       
+      const cleanSlug = marketSlug.split('?')[0].trim();
+      
       // 1. Try to find the market
       let { data: m } = await supabase
         .from('markets')
         .select('id')
-        .eq('polymarket_market_id', marketSlug)
+        .eq('polymarket_market_id', cleanSlug)
         .maybeSingle();
         
       // 2. If not found, create it (lazily) so we can attach state
       if (!m) {
           const { data: newM, error: createErr } = await supabase.from('markets').insert({
-              polymarket_market_id: marketSlug,
+              polymarket_market_id: cleanSlug,
               asset: 'BTC', // Default fallback
               enabled: false,
               direction: 'UP',
@@ -344,7 +351,7 @@ export const Dashboard: React.FC = () => {
               last_update: new Date().toISOString()
           }).eq('market_id', m.id);
           
-          alert(`Used Budget reset to $0. The bot is now allowed to trade up to its Max Budget for ${marketSlug}.`);
+          alert(`Used Budget reset to $0. The bot is now allowed to trade up to its Max Budget for ${cleanSlug}.`);
       }
   };
 
