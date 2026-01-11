@@ -1,6 +1,8 @@
 
 import { supabase } from './supabase';
 import { Logger } from '../utils/logger';
+import { GoogleGenAI } from "@google/genai";
+import { ENV } from '../config/env';
 
 export interface ConfidenceBucketStat {
   confidence_bucket: string;
@@ -27,6 +29,66 @@ export interface AnalysisReport {
 }
 
 export class AnalysisService {
+  private ai: GoogleGenAI;
+
+  constructor() {
+    this.ai = new GoogleGenAI({ apiKey: ENV.API_KEY });
+  }
+
+  /**
+   * Orchestrates the fetching of data and the generation of the AI report.
+   */
+  public async produceAiReport(runId: string): Promise<string | null> {
+    if (!ENV.API_KEY) {
+        Logger.error("[ANALYSIS] Missing API_KEY. Cannot generate AI report.");
+        return "Error: API Key missing in environment configuration.";
+    }
+
+    const reportData = await this.generateRunAnalysis(runId);
+    if (!reportData) return "Error: No data found for this run.";
+
+    const prompt = `
+    ROLE:
+    You are a junior quantitative trading analyst tasked with reviewing completed experimental results.
+    
+    TASK:
+    Analyze the provided experimental results JSON.
+    Produce a structured, factual Markdown report.
+    
+    CONSTRAINTS:
+    - Base conclusions ONLY on the provided metrics.
+    - No emojis.
+    - No motivational language.
+    - No trading advice.
+    - Explicitly state if data is insufficient for a section.
+    - Reference numbers, counts, or percentages for every claim.
+    
+    INPUT DATA:
+    ${JSON.stringify(reportData, null, 2)}
+    
+    REQUIRED SECTIONS:
+    1. Executive Summary (Data-Bound, 1 paragraph)
+    2. Confidence Analysis (Profitability by bucket, concentration)
+    3. Regime Sensitivity (Performance by regime)
+    4. Drawdown & Risk Observations
+    5. Hypotheses (Max 3, clearly labeled "Hypothesis: ...")
+    6. Data Gaps & Limitations
+    `;
+
+    try {
+        const response = await this.ai.models.generateContent({
+            model: 'gemini-3-flash-preview',
+            contents: prompt,
+            config: {
+                temperature: 0.1, // High precision/factual
+            }
+        });
+        return response.text || "No response generated.";
+    } catch (err: any) {
+        Logger.error(`[ANALYSIS] AI Generation Error`, err);
+        return `Error generating report: ${err.message}`;
+    }
+  }
 
   /**
    * Generates a full structured report for a completed/expired Run.

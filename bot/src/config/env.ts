@@ -1,3 +1,4 @@
+
 import dotenv from 'dotenv';
 import { Logger } from '../utils/logger';
 
@@ -18,6 +19,9 @@ export const ENV = {
   POLY_API_KEY: process.env.POLY_API_KEY || '',
   POLY_API_SECRET: process.env.POLY_API_SECRET || '',
   POLY_PASSPHRASE: process.env.POLY_PASSPHRASE || '',
+
+  // AI Analysis
+  API_KEY: process.env.API_KEY || '',
 };
 
 export function validateEnv() {
@@ -40,5 +44,9 @@ export function validateEnv() {
 
   if (ENV.DRY_RUN) {
     Logger.warn("!!! RUNNING IN DRY_RUN MODE - NO REAL TRADES WILL BE EXECUTED !!!");
+  }
+
+  if (!ENV.API_KEY) {
+    Logger.warn("Missing API_KEY. AI Analysis features will be unavailable.");
   }
 }
