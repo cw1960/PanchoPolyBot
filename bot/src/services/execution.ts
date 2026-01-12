@@ -17,6 +17,7 @@ export interface ScalingMetadata {
     scalingFactor: number;
     tradeSizeOverride: number;
     mode?: ExecutionMode; // Execution Mode request
+    lockedDirection?: 'UP' | 'DOWN' | null; // SAFETY: Authoritative Lock from MarketLoop
 }
 
 export class ExecutionService {
@@ -36,6 +37,29 @@ export class ExecutionService {
     const run = market._run;
     const expParams = run?.params || {};
     const executionMode: ExecutionMode = scalingMeta?.mode || 'AGGRESSIVE';
+
+    // ------------------------------------------------------------------
+    // 0. CRITICAL INVARIANT: PASSIVE DIRECTION SAFETY
+    // ------------------------------------------------------------------
+    // Trace: MarketLoop (State) -> evaluateScaling -> attemptTrade
+    // Rule: If we are in PASSIVE mode, and the market has a locked direction,
+    // we MUST NOT trade the opposite side.
+    if (executionMode === 'PASSIVE') {
+        const lockedDir = scalingMeta?.lockedDirection;
+        
+        // If the market is locked, strictly enforce alignment
+        if (lockedDir && lockedDir !== obs.direction) {
+             const errorMsg = `[INVARIANT_VIOLATION] PASSIVE order attempted on ${obs.direction} while lockedDirection=${lockedDir}`;
+             Logger.error(errorMsg);
+             throw new Error(errorMsg); // HARD STOP
+        }
+        
+        // Affirmation Log for Auditability
+        if (lockedDir) {
+             Logger.info(`[PASSIVE_GUARD_OK] market=${market.polymarket_market_id} locked=${lockedDir} order=${obs.direction}`);
+        }
+    }
+    // ------------------------------------------------------------------
 
     // SIZE LOGIC
     let betSizeUSDC: number;

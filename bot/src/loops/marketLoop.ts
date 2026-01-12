@@ -339,7 +339,8 @@ export class MarketLoop {
                   clipIndex: nextTierIdx + 1,
                   scalingFactor: tierConfig.sizeMult,
                   tradeSizeOverride: tradeSize,
-                  mode: executionMode
+                  mode: executionMode,
+                  lockedDirection: this.scalingState.lockedDirection // Pass authoritative lock for invariant check
               }
           );
 
