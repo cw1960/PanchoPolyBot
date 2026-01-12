@@ -62,14 +62,15 @@ export class MarketLoop {
       if (data) this.currentExposure = data.exposure || 0;
   }
 
-  public stop() {
+  public stop(reason: string = 'MANUAL') {
     if (!this.active) return;
     this.active = false;
     if (this.intervalId) {
         clearInterval(this.intervalId);
         this.intervalId = null;
     }
-    Logger.info(`[LOOP_STOP] Stopped Market Loop: ${this.market.polymarket_market_id}`);
+    // Goal 2: Authoritative Log at Shutdown
+    Logger.info(`[MARKET_LOOP_STOP] marketId=${this.market.id} reason=${reason} finalTickTime=${new Date(this.lastWriteTime).toISOString()}`);
   }
 
   public updateConfig(newConfig: Market) {
@@ -77,7 +78,9 @@ export class MarketLoop {
   }
 
   private async tick() {
+    // Strict Guard
     if (!this.active) return;
+
     const run = this.market._run;
     if (!run || run.status !== 'RUNNING') return; 
 
@@ -129,7 +132,7 @@ export class MarketLoop {
 
        if (!error && count === 0) {
            Logger.error(`[EXPOSURE_BUG] INVARIANT VIOLATED! Local exposure ${this.currentExposure} but 0 trades in DB for run ${run.id}. Halting.`);
-           this.stop();
+           this.stop('INVARIANT_VIOLATION');
            return;
        }
     }
@@ -156,7 +159,6 @@ export class MarketLoop {
                  let source = 'UNKNOWN';
 
                  // Strategy 1: Explicitly Fetch Mid Price of YES Token
-                 // This avoids ambiguity with 'direction' or 'impliedProbability' of the losing side.
                  try {
                      const tokens = await polymarket.getTokens(this.market.polymarket_market_id);
                      if (tokens && tokens.up) {
@@ -176,14 +178,13 @@ export class MarketLoop {
                          settlePrice = observation.calculatedProbability;
                          source = 'MODEL_PROBABILITY';
                      }
-                     // Strategy 3: Theoretical Outcome based on Delta
                      else if (observation.delta !== 0) {
                          settlePrice = observation.delta > 0 ? 1.0 : 0.0;
                          source = 'THEORETICAL_DELTA';
                      }
                  }
 
-                 // Strategy 4: Ultimate Fallback
+                 // Strategy 3: Ultimate Fallback
                  if (source === 'UNKNOWN') {
                      settlePrice = 0.5;
                      source = 'FALLBACK_COINFLIP';
@@ -193,7 +194,7 @@ export class MarketLoop {
              }
              
              // CRITICAL: Stop loop to prevent zombie processing
-             this.stop();
+             this.stop('EXPIRED');
              return;
           }
       }

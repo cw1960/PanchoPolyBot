@@ -31,24 +31,30 @@ export class MarketRotator {
             // 1. Ensure Master Run Exists
             await this.ensureMasterRun();
             if (!this.activeRunId) {
-                Logger.warn("[ROTATOR] Skipping tick - Could not establish Master Run ID.");
+                this.logDecision('SKIPPED', 'NO_MASTER_RUN_ID');
                 return;
             }
 
-            // 2. Calculate Current Bucket
-            // A 15m market expiring at 12:15 covers 12:00-12:15.
-            // If it is 12:01, we want the market expiring at 12:15.
-            // If it is 12:14, we want the market expiring at 12:15.
-            // Formula: Next quarter hour.
+            // 2. Calculate Current Bucket (Strict Alignment)
+            // bucketStart = floor(now / 15min) * 15min
+            // bucketEnd = bucketStart + 15min
             const bucketDuration = 15 * 60 * 1000;
-            const nextExpiryMs = Math.ceil(now / bucketDuration) * bucketDuration;
-            const nextExpiryIso = new Date(nextExpiryMs).toISOString();
+            const bucketStartMs = Math.floor(now / bucketDuration) * bucketDuration;
+            const bucketEndMs = bucketStartMs + bucketDuration;
+            
+            const bucketStartIso = new Date(bucketStartMs).toISOString();
+            const bucketEndIso = new Date(bucketEndMs).toISOString();
 
-            Logger.info(`[ROTATOR] Tick. Target Bucket Expiry: ${nextExpiryIso}`);
+            // Goal 1: Verify 15-minute bucket alignment (NO off-by-one errors)
+            Logger.info(`[ROTATOR_CHECK] now=${new Date(now).toISOString()} bucketStart=${bucketStartIso} bucketEnd=${bucketEndIso}`);
 
             // 3. Process Each Asset
             for (const asset of ENV.ROTATION_ASSETS) {
-                await this.ensureMarketForBucket(asset, nextExpiryIso);
+                if (this.shouldTradeBucket(asset, bucketStartMs, bucketEndMs)) {
+                     await this.ensureMarketForBucket(asset, bucketEndIso, bucketStartIso);
+                } else {
+                     this.logDecision('SKIPPED', `BUCKET_FILTER_REJECTED_${asset}`);
+                }
             }
 
         } catch (err) {
@@ -56,10 +62,17 @@ export class MarketRotator {
         }
     }
 
+    private logDecision(action: string, reason: string, details?: any) {
+        Logger.info(`[ROTATOR_DECISION] ${action} reason=${reason}`, details);
+    }
+
+    // Optional Hook: Future extensibility for skipping buckets (e.g. Low Volatility)
+    private shouldTradeBucket(asset: string, startMs: number, endMs: number): boolean {
+        return true; 
+    }
+
     private async ensureMasterRun() {
         // Idempotent check for a run named "AUTO-ROTATION-MASTER"
-        // If it exists and is COMPLETED, we restart it? 
-        // Prompt says "One continuous DRY_RUN".
         
         // 1. Check local cache first
         if (this.activeRunId) return;
@@ -101,17 +114,43 @@ export class MarketRotator {
         Logger.info(`[ROTATOR] Master Run Established: ${this.activeRunId}`);
     }
 
-    private async ensureMarketForBucket(asset: string, expiryIso: string) {
+    private async ensureMarketForBucket(asset: string, expiryIso: string, startIso: string) {
+        // Goal 2: Safety Assertion (DRY_RUN only) - One active market per asset
+        if (ENV.DRY_RUN) {
+             const { data: activeMarkets } = await supabase
+                .from('markets')
+                .select('id, t_expiry, polymarket_market_id')
+                .eq('asset', asset)
+                .eq('enabled', true);
+             
+             if (activeMarkets && activeMarkets.length > 0) {
+                 // Check if the active market is DIFFERENT from target expiry
+                 const conflict = activeMarkets.find(m => m.t_expiry !== expiryIso);
+                 if (conflict) {
+                     Logger.warn(`[ROTATOR_SAFETY] Overlap detected! Active: ${conflict.polymarket_market_id} (${conflict.t_expiry}). Target: ${expiryIso}`);
+                     this.logDecision('SKIPPED', 'SAFETY_OVERLAP_DETECTED', { asset, conflictId: conflict.id });
+                     return;
+                 }
+             }
+        }
+
         // 1. Check if we already have this market in DB
         // We query by t_expiry to match our bucket target
         const { data: existing } = await supabase
             .from('markets')
-            .select('id, polymarket_market_id, enabled, active_run_id')
+            .select('id, polymarket_market_id, enabled, active_run_id, t_open, t_expiry')
             .eq('asset', asset)
             .eq('t_expiry', expiryIso)
             .maybeSingle();
 
         if (existing) {
+            // Alignment Verification
+            if (existing.t_expiry !== expiryIso) {
+                 // This theoretically shouldn't happen due to the query, but good for sanity
+                 this.logDecision('SKIPPED', 'DB_METADATA_MISMATCH', { id: existing.id });
+                 return;
+            }
+
             // It exists. Ensure it's enabled and linked to our run.
             if (!existing.enabled || existing.active_run_id !== this.activeRunId) {
                 Logger.info(`[ROTATOR] Re-enabling existing market: ${existing.polymarket_market_id}`);
@@ -119,9 +158,9 @@ export class MarketRotator {
                     enabled: true,
                     active_run_id: this.activeRunId
                 }).eq('id', existing.id);
+                this.logDecision('ENABLED', 'REACTIVATED_EXISTING', { slug: existing.polymarket_market_id });
             } else {
-                // Already running fine
-                // Logger.info(`[ROTATOR] Market active: ${existing.polymarket_market_id}`);
+                this.logDecision('SKIPPED', 'MARKET_ALREADY_ACTIVE');
             }
             return;
         }
@@ -131,7 +170,8 @@ export class MarketRotator {
         const marketData = await polymarket.findMarketForAssetAndExpiry(asset, expiryIso);
 
         if (!marketData) {
-            Logger.warn(`[ROTATOR] No market found for ${asset} @ ${expiryIso}. Retrying next tick.`);
+            this.logDecision('SKIPPED', 'API_DISCOVERY_FAILED', { asset, expiryIso });
+            // Logger.warn(`[ROTATOR] No market found for ${asset} @ ${expiryIso}. Retrying next tick.`);
             return;
         }
 
@@ -155,6 +195,7 @@ export class MarketRotator {
                 t_open: marketData.startDate,
                 asset: asset
             }).eq('id', slugCheck.id);
+            this.logDecision('ENABLED', 'REGISTERED_BY_SLUG', { slug });
         } else {
             // Insert new
             await supabase.from('markets').insert({
@@ -168,6 +209,7 @@ export class MarketRotator {
                 t_expiry: marketData.endDate,
                 baseline_price: 0 // Will be hydrated by EdgeEngine
             });
+            this.logDecision('ENABLED', 'INSERTED_NEW', { slug });
         }
     }
 }
