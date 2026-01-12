@@ -44,9 +44,11 @@ export class ExecutionService {
       // Since we don't have a live portfolio sync, we sum up open trades from PnL Ledger.
       const position = await pnlLedger.getNetPosition(runId, market.id);
       
+      // INVARIANT 2: NO ZERO EXPOSURE EXIT
+      // If we attempt to exit with zero/negative shares, we are logic-drifting.
+      // This invariant ensures we never "guess" or flip into a short/long accidentally.
       if (position.shares <= 0) {
-          Logger.warn(`[${contextId}] No open position found to exit.`);
-          return { executed: true }; // Treat as success (nothing to exit)
+          throw new Error(`[INVARIANT_VIOLATION] Defensive exit attempted with zero/negative exposure: ${position.shares}`);
       }
 
       Logger.info(`[${contextId}] DEFENSIVE EXIT ${lockedDirection} (${reasonDetails.reason}): Closing ${position.shares.toFixed(2)} shares.`);

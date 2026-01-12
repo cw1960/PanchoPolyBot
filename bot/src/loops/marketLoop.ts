@@ -35,6 +35,9 @@ export class MarketLoop {
   private currentExposure: number = 0; 
   private lastRunId: string | undefined = undefined;
   
+  // INVARIANT 1: TERMINAL STATE FLAG
+  private hasExitedDefensively: boolean = false;
+
   // To handle external resets
   private lastWriteTime: number = 0;
   private lastLogTime: number = 0; // Throttle idle logs
@@ -79,6 +82,9 @@ export class MarketLoop {
     await this.hydrateScalingState();
     
     this.active = true;
+    // Reset terminal flag on fresh start (lifecycle management)
+    this.hasExitedDefensively = false;
+
     Logger.info(`[LOOP_START] Market: ${this.market.polymarket_market_id} | Dir: ${this.scalingState.lockedDirection || 'OPEN'} | Clips: ${this.scalingState.clipsPlaced}`);
 
     this.intervalId = setInterval(() => {
@@ -145,7 +151,13 @@ export class MarketLoop {
         clearInterval(this.intervalId);
         this.intervalId = null;
     }
-    Logger.info(`[MARKET_LOOP_STOP] marketId=${this.market.id} reason=${reason} finalTickTime=${new Date(this.lastWriteTime).toISOString()}`);
+    
+    // Explicit Audit Log for Terminal State
+    if (this.hasExitedDefensively) {
+        Logger.info(`[MARKET_LOOP_STOP] reason=DEFENSIVE_EXIT marketId=${this.market.id}`);
+    } else {
+        Logger.info(`[MARKET_LOOP_STOP] marketId=${this.market.id} reason=${reason} finalTickTime=${new Date(this.lastWriteTime).toISOString()}`);
+    }
   }
 
   public updateConfig(newConfig: Market) {
@@ -154,6 +166,12 @@ export class MarketLoop {
 
   private async tick() {
     if (!this.active) return;
+
+    // INVARIANT 1: HARD TERMINAL GUARD
+    if (this.hasExitedDefensively) {
+        Logger.warn(`[INVARIANT_GUARD] Tick attempted after Defensive Exit. Ignoring.`);
+        return;
+    }
 
     const run = this.market._run;
     if (!run || run.status !== 'RUNNING') return; 
@@ -166,6 +184,7 @@ export class MarketLoop {
         this.priceHistory = [];
         this.lastRunId = run.id;
         this.lastTradeTime = 0;
+        this.hasExitedDefensively = false; // Reset allowed on new run ID only
         
         await supabase.from('market_state').upsert({
             market_id: this.market.id,
@@ -254,6 +273,7 @@ export class MarketLoop {
           );
 
           if (exitDecision) {
+              // TERMINAL BRANCH
               await this.executeDefensiveExit(exitDecision);
               return; // Stop processing immediately
           }
@@ -303,11 +323,13 @@ export class MarketLoop {
 
   /**
    * Executes a defensive exit: Halts scaling, sells inventory, stops loop.
+   * REACHABLE ONLY ONCE per market due to hasExitedDefensively flag.
    */
   private async executeDefensiveExit(decision: any) {
       if (!this.scalingState.lockedDirection) return;
 
-      Logger.warn(`[DEFENSIVE_EXIT] Triggered: ${decision.reason} - ${decision.description}`);
+      // Log Mandatory Trigger Event
+      Logger.info(`[DEFENSIVE_EXIT_TRIGGERED] marketId=${this.market.id} reason=${decision.reason} netExposure=${this.currentExposure} entryDirection=${this.scalingState.lockedDirection}`);
       
       const result = await executionService.defensiveExit(
           this.market,
@@ -316,12 +338,14 @@ export class MarketLoop {
       );
 
       if (result.executed) {
-          this.currentExposure = 0; // Reset local exposure
-          Logger.info(`[DEFENSIVE_EXIT] Clean Exit Complete.`);
+          // LOCK TERMINAL STATE
+          this.hasExitedDefensively = true;
+          this.currentExposure = 0; 
           this.stop(`DEFENSIVE_EXIT:${decision.reason}`);
       } else {
           Logger.error(`[DEFENSIVE_EXIT] Execution Failed. Retrying next tick.`);
-          // We do not stop here, allowing retry on next tick
+          // If execution failed (network error), we do NOT set terminal flag yet,
+          // allowing the next tick to retry the exit.
       }
   }
 
