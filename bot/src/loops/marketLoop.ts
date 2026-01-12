@@ -8,6 +8,7 @@ import { executionService, ExecutionMode } from '../services/execution';
 import { supabase } from '../services/supabase';
 import { polymarket } from '../services/polymarket';
 import { pnlLedger } from '../services/pnlLedger';
+import { defensiveExitEvaluator } from '../services/defensiveExit';
 
 interface TierConfig {
     level: number;
@@ -19,6 +20,8 @@ interface TierConfig {
 
 interface ScalingState {
     lockedDirection: 'UP' | 'DOWN' | null;
+    entryRegime?: string;     // New: For Regime Invalidation checks
+    entryConfidence?: number; // New: For Thesis tracking
     clipsPlaced: number;
     lastTierLevel: number;
     history: { conf: number; dir: string; ts: number }[];
@@ -92,7 +95,7 @@ export class MarketLoop {
       
       const { data: trades } = await supabase
           .from('trade_events')
-          .select('side, status')
+          .select('side, status, signals')
           .eq('test_run_id', this.market.active_run_id)
           .eq('market_id', this.market.id)
           .eq('status', 'EXECUTED')
@@ -103,6 +106,12 @@ export class MarketLoop {
           const firstTrade = trades[0];
           this.scalingState.lockedDirection = firstTrade.side as 'UP' | 'DOWN';
           
+          // Attempt to restore entry regime/confidence from signals json if available
+          if (firstTrade.signals) {
+              this.scalingState.entryRegime = firstTrade.signals.regime;
+              // this.scalingState.entryConfidence = ... (might not be in signals flat, but that's okay, we can proceed without strict invalidation if missing)
+          }
+
           // Count executed clips
           this.scalingState.clipsPlaced = trades.length;
           
@@ -115,6 +124,8 @@ export class MarketLoop {
           this.scalingState.lockedDirection = null;
           this.scalingState.clipsPlaced = 0;
           this.scalingState.lastTierLevel = 0;
+          this.scalingState.entryRegime = undefined;
+          this.scalingState.entryConfidence = undefined;
       }
   }
 
@@ -232,13 +243,29 @@ export class MarketLoop {
       let status: 'WATCHING' | 'OPPORTUNITY' | 'LOCKED' = 'WATCHING';
       if (!observation.isSafeToTrade) status = 'LOCKED';
 
-      // 6. SCALING EVALUATION
+      // 6. DEFENSIVE EXIT EVALUATION
+      // Run this BEFORE Scaling Logic to prioritize capital protection
+      if (this.scalingState.lockedDirection && this.currentExposure > 0) {
+          const exitDecision = defensiveExitEvaluator.shouldExit(
+              observation,
+              this.scalingState.history,
+              this.scalingState.entryRegime,
+              this.scalingState.entryConfidence
+          );
+
+          if (exitDecision) {
+              await this.executeDefensiveExit(exitDecision);
+              return; // Stop processing immediately
+          }
+      }
+
+      // 7. SCALING EVALUATION
       if (status !== 'LOCKED') {
           await this.evaluateScaling(observation, run.params?.cooldown || DEFAULTS.DEFAULT_COOLDOWN_MS, baseTradeSize);
           if (this.scalingState.clipsPlaced > 0) status = 'OPPORTUNITY';
       }
 
-      // 7. PnL Sync
+      // 8. PnL Sync
       const now = Date.now();
       if (ENV.DRY_RUN && (now - this.lastPnlSyncTime > this.PNL_SYNC_INTERVAL_MS)) {
            this.lastPnlSyncTime = now;
@@ -251,7 +278,7 @@ export class MarketLoop {
            }
       }
 
-      // 8. State Persistence
+      // 9. State Persistence
       const nowTs = new Date().toISOString();
       const stateRow: MarketStateRow = {
         market_id: this.market.id,
@@ -272,6 +299,30 @@ export class MarketLoop {
     } catch (err) {
       Logger.error(`Tick Error ${this.market.polymarket_market_id}`, err);
     }
+  }
+
+  /**
+   * Executes a defensive exit: Halts scaling, sells inventory, stops loop.
+   */
+  private async executeDefensiveExit(decision: any) {
+      if (!this.scalingState.lockedDirection) return;
+
+      Logger.warn(`[DEFENSIVE_EXIT] Triggered: ${decision.reason} - ${decision.description}`);
+      
+      const result = await executionService.defensiveExit(
+          this.market,
+          this.scalingState.lockedDirection,
+          decision
+      );
+
+      if (result.executed) {
+          this.currentExposure = 0; // Reset local exposure
+          Logger.info(`[DEFENSIVE_EXIT] Clean Exit Complete.`);
+          this.stop(`DEFENSIVE_EXIT:${decision.reason}`);
+      } else {
+          Logger.error(`[DEFENSIVE_EXIT] Execution Failed. Retrying next tick.`);
+          // We do not stop here, allowing retry on next tick
+      }
   }
 
   /**
@@ -312,13 +363,7 @@ export class MarketLoop {
 
       if (isEligible) {
           // F. PASSIVE VS AGGRESSIVE MODE SELECTION
-          // Criteria for Passive:
-          // 1. Time Remaining > 3 minutes (Enough time to get filled)
-          // 2. Spread > 2 cents (Worth capturing)
-          // 3. High Confidence (Already implied by Tier logic, but let's reinforce)
-          
           let executionMode: ExecutionMode = 'AGGRESSIVE';
-          
           const timeRemaining = obs.timeToExpiryMs || 0;
           const spread = obs.orderBook?.spread || 0;
           
@@ -355,18 +400,19 @@ export class MarketLoop {
               
               if (!this.scalingState.lockedDirection) {
                   this.scalingState.lockedDirection = obs.direction;
-                  Logger.info(`[SCALING] DIRECTION LOCKED: ${obs.direction}`);
+                  // RECORD ENTRY METADATA for Defensive Checks
+                  this.scalingState.entryRegime = obs.regime;
+                  this.scalingState.entryConfidence = obs.confidence;
+
+                  Logger.info(`[SCALING] DIRECTION LOCKED: ${obs.direction} (Regime: ${obs.regime})`);
               }
               
               Logger.info(`[SCALING] Executed Clip #${this.scalingState.clipsPlaced} (Tier ${tierConfig.level})`);
           } else if (executionMode === 'PASSIVE') {
-             // Passive failed (Spread closed or Sim Dice Roll failed)
-             // We do NOT immediately retry aggressively here to respect "Passive First".
-             // We wait for next tick.
              Logger.info(`[SCALING] Passive Attempt Missed/Skipped. Waiting for next tick.`);
           }
       } else {
-          // Optional: Debug Log for "Almost there" (reduce spam)
+          // Optional: Debug Log for "Almost there"
           if (obs.confidence >= tierConfig.minConf && Math.random() < 0.05) {
               Logger.info(`[SCALING] Tier ${tierConfig.level} pending persistence (${validSamples.length}/${tierConfig.persistenceSamples})...`);
           }

@@ -24,6 +24,119 @@ export class ExecutionService {
   
   private static readonly MAX_ENTRY_PRICE_DEFAULT = 0.95;
 
+  /**
+   * Executes a Defensive Exit (Panic Close) for the entire position.
+   * This is an AGGRESSIVE Taker order to exit immediately.
+   */
+  public async defensiveExit(
+      market: Market, 
+      lockedDirection: 'UP' | 'DOWN', 
+      reasonDetails: any
+    ): Promise<{ executed: boolean }> {
+      
+      const contextId = `EXIT-${Date.now()}`;
+      const mode = ENV.DRY_RUN ? 'DRY_RUN' : 'LIVE';
+      const runId = market.active_run_id;
+
+      if (!runId) return { executed: false };
+
+      // 1. Determine Position Size (Shares)
+      // Since we don't have a live portfolio sync, we sum up open trades from PnL Ledger.
+      const position = await pnlLedger.getNetPosition(runId, market.id);
+      
+      if (position.shares <= 0) {
+          Logger.warn(`[${contextId}] No open position found to exit.`);
+          return { executed: true }; // Treat as success (nothing to exit)
+      }
+
+      Logger.info(`[${contextId}] DEFENSIVE EXIT ${lockedDirection} (${reasonDetails.reason}): Closing ${position.shares.toFixed(2)} shares.`);
+
+      // 2. Resolve Tokens
+      const tokens = await polymarket.getTokens(market.polymarket_market_id);
+      if (!tokens) {
+          Logger.error(`[${contextId}] Tokens not found for exit.`);
+          return { executed: false };
+      }
+
+      const sideToSell = lockedDirection === 'UP' ? 'UP' : 'DOWN';
+      const tokenId = sideToSell === 'UP' ? tokens.up : tokens.down;
+
+      // 3. Execution (Market Sell / Limit at Bid)
+      try {
+          if (ENV.DRY_RUN) {
+              await new Promise(r => setTimeout(r, 200));
+              
+              // Close the ledger positions
+              await pnlLedger.closePosition(runId, market.id, 'DEFENSIVE_EXIT', reasonDetails);
+              
+              TradeLogger.log({
+                  test_run_id: runId,
+                  market_id: market.id,
+                  polymarket_market_id: market.polymarket_market_id,
+                  asset: market.asset,
+                  side: lockedDirection,
+                  stake_usd: 0, // Exit doesn't stake new money
+                  entry_prob: 0,
+                  confidence: reasonDetails.confidence,
+                  status: 'EXECUTED',
+                  decision_reason: `EXIT:${reasonDetails.reason}`,
+                  outcome: 'CLOSED',
+                  context: { 
+                      mode: 'DRY_RUN', 
+                      exitType: 'DEFENSIVE', 
+                      sharesClosed: position.shares,
+                      reasonDetails
+                  }
+              });
+
+              return { executed: true };
+          } 
+
+          // LIVE EXECUTION
+          // We need to SELL the position. 
+          // Polymarket CLOB: Sell is a separate side? Or negative size?
+          // Using clob-client: createOrder({ side: Side.SELL })
+          
+          // Get Market Bid Price for limit (aggressive marketable limit)
+          const depth = await polymarket.getMarketDepth(tokenId);
+          const sellPrice = depth?.bestBid || 0.01; // Sell into bid
+
+          if (sellPrice <= 0.01) {
+              Logger.warn(`[${contextId}] Bid price too low (${sellPrice}). Cannot exit safely.`);
+              return { executed: false };
+          }
+
+          const orderId = await polymarket.placeOrder(tokenId, 'SELL', sellPrice, position.shares);
+
+          TradeLogger.log({
+              test_run_id: runId,
+              market_id: market.id,
+              polymarket_market_id: market.polymarket_market_id,
+              asset: market.asset,
+              side: lockedDirection,
+              stake_usd: 0,
+              entry_prob: sellPrice,
+              confidence: reasonDetails.confidence,
+              status: 'EXECUTED',
+              decision_reason: `EXIT:${reasonDetails.reason}`,
+              outcome: 'CLOSED',
+              context: { 
+                  mode: 'LIVE', 
+                  orderId,
+                  exitType: 'DEFENSIVE', 
+                  sharesClosed: position.shares,
+                  reasonDetails 
+              }
+          });
+
+          return { executed: true };
+
+      } catch (err: any) {
+          Logger.error(`[${contextId}] Exit Failed`, err);
+          return { executed: false };
+      }
+  }
+
   public async attemptTrade(
       market: Market, 
       obs: MarketObservation, 
@@ -41,20 +154,13 @@ export class ExecutionService {
     // ------------------------------------------------------------------
     // 0. CRITICAL INVARIANT: PASSIVE DIRECTION SAFETY
     // ------------------------------------------------------------------
-    // Trace: MarketLoop (State) -> evaluateScaling -> attemptTrade
-    // Rule: If we are in PASSIVE mode, and the market has a locked direction,
-    // we MUST NOT trade the opposite side.
     if (executionMode === 'PASSIVE') {
         const lockedDir = scalingMeta?.lockedDirection;
-        
-        // If the market is locked, strictly enforce alignment
         if (lockedDir && lockedDir !== obs.direction) {
              const errorMsg = `[INVARIANT_VIOLATION] PASSIVE order attempted on ${obs.direction} while lockedDirection=${lockedDir}`;
              Logger.error(errorMsg);
              throw new Error(errorMsg); // HARD STOP
         }
-        
-        // Affirmation Log for Auditability
         if (lockedDir) {
              Logger.info(`[PASSIVE_GUARD_OK] market=${market.polymarket_market_id} locked=${lockedDir} order=${obs.direction}`);
         }
@@ -87,25 +193,16 @@ export class ExecutionService {
 
         const makerPrice = this.calculateMakerPrice(bestBid, bestAsk);
         
-        // Fallback constraint: If maker price calculation fails or book is crossed, default to aggressive cap or abort?
-        // Logic: if makerPrice >= bestAsk, we are crossing spread (Taking).
-        // Since we wanted PASSIVE, we should ideally back off, but for now we clamp to (BestAsk - tick) if possible.
         if (makerPrice < bestAsk) {
             executionPrice = makerPrice;
             isMaker = true;
         } else {
-            // Safety: If spread is closed, we cannot be passive.
-            // Since mode was requested as PASSIVE, we should technically SKIP.
-            // However, to ensure execution flow in simple bot, we might clip it.
-            // Strict Maker Rule:
             Logger.info(`[EXEC] Passive mode requested but spread too tight (Bid:${bestBid} Ask:${bestAsk}). Skipping.`);
             return { executed: false, newExposure: currentExposure };
         }
     } else {
         // AGGRESSIVE: Marketable Limit Order (Best Ask or Limit)
-        // We stick to entryLimitPrice (Max willingness to pay), enabling Taker fill if BestAsk < entryLimitPrice
         if (obs.orderBook && obs.orderBook.bestAsk > entryLimitPrice) {
-            // Price is too high even for Taker
             Logger.info(`[EXEC] Price too high. BestAsk: ${obs.orderBook.bestAsk} > Limit: ${entryLimitPrice}`);
             return { executed: false, newExposure: currentExposure };
         }
@@ -185,17 +282,12 @@ export class ExecutionService {
     try {
       if (ENV.DRY_RUN) {
           // DRY RUN SIMULATION
-          // If Passive/Maker, we must simulate fill probability.
           if (executionMode === 'PASSIVE') {
-               // Probabilistic Fill Simulation
-               // Factors: Spread tightness, volatility (regime), and random luck.
-               // Simple Heuristic: 40% chance of fill per tick if improving bid.
                const fillRoll = Math.random();
                const fillThreshold = 0.40; // 40% chance
                
                if (fillRoll > fillThreshold) {
                    Logger.info(`[DRY_RUN] Passive Order NOT Filled (Roll: ${fillRoll.toFixed(2)} > ${fillThreshold})`);
-                   // Return FALSE execution so MarketLoop knows it failed
                    return { executed: false, newExposure: currentExposure };
                } else {
                    Logger.info(`[DRY_RUN] Passive Order FILLED (Simulated)`);
@@ -252,7 +344,6 @@ export class ExecutionService {
       
       Logger.info(`[EXPOSURE] CONSUME run=${market.active_run_id} market=${market.polymarket_market_id} +${betSizeUSDC}`);
 
-      // We bump exposure immediately even for Maker orders because funds are locked
       return { executed: true, newExposure: currentExposure + betSizeUSDC };
 
     } catch (err: any) {
@@ -262,18 +353,10 @@ export class ExecutionService {
     }
   }
 
-  /**
-   * Calculates a Passive Price (Maker).
-   * Strategy: Improve Best Bid by 1 tick (0.001), but do not cross Spread.
-   */
   private calculateMakerPrice(bestBid: number, bestAsk: number): number {
-      const TICK_SIZE = 0.001; // Conservative tick
+      const TICK_SIZE = 0.001; 
       const target = bestBid + TICK_SIZE;
-      
-      // Ensure we don't match/cross the ask (which would be Taker)
-      if (target >= bestAsk) {
-          return bestBid; // Just join the bid if spread is 1 tick
-      }
+      if (target >= bestAsk) return bestBid;
       return target;
   }
 }
