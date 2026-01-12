@@ -22,6 +22,10 @@ export const ENV = {
 
   // AI Analysis
   API_KEY: process.env.API_KEY || '',
+
+  // Automated Rotation
+  AUTO_ROTATION: process.env.AUTO_ROTATION === 'true',
+  ROTATION_ASSETS: (process.env.ROTATION_ASSETS || 'BTC').split(',').map(s => s.trim())
 };
 
 export function validateEnv() {
@@ -48,5 +52,9 @@ export function validateEnv() {
 
   if (!ENV.API_KEY) {
     Logger.warn("Missing API_KEY. AI Analysis features will be unavailable.");
+  }
+
+  if (ENV.AUTO_ROTATION) {
+    Logger.info(`[AUTO_ROTATION] ENABLED for assets: ${ENV.ROTATION_ASSETS.join(', ')}`);
   }
 }

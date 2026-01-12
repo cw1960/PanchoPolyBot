@@ -1,4 +1,5 @@
 
+
 import { ethers } from 'ethers';
 import { ClobClient, Side } from '@polymarket/clob-client';
 import { ENV } from '../config/env';
@@ -22,9 +23,9 @@ class PolymarketService {
         137,
         this.signer as any, // Cast to avoid v6/v5 type mismatch
         {
-          apiKey: ENV.POLY_API_KEY,
-          apiSecret: ENV.POLY_API_SECRET,
-          apiPassphrase: ENV.POLY_PASSPHRASE,
+          key: ENV.POLY_API_KEY,
+          secret: ENV.POLY_API_SECRET,
+          passphrase: ENV.POLY_PASSPHRASE,
         }
       );
     } catch (err) {
@@ -88,6 +89,45 @@ class PolymarketService {
       Logger.error(`Failed to fetch metadata for ${slug}`, err);
       return null;
     }
+  }
+
+  /**
+   * Finds a specific 15-minute market for an asset that matches the given expiry time.
+   * This is used by the Auto-Rotator to discover the correct market slug.
+   * 
+   * @param asset 'BTC' or 'ETH'
+   * @param expiryIso ISO String of the target bucket end time (e.g., "2023-10-27T12:15:00.000Z")
+   */
+  public async findMarketForAssetAndExpiry(asset: string, expiryIso: string): Promise<any | null> {
+    const keyword = asset === 'BTC' ? 'Bitcoin' : asset === 'ETH' ? 'Ethereum' : asset;
+    
+    // We look for "Active" events primarily, but also check if they are newly created.
+    const url = `https://gamma-api.polymarket.com/events?limit=20&active=true&closed=false&keyword=${keyword}`;
+    
+    try {
+        const res = await axios.get(url, { timeout: 5000 });
+        const targetTime = new Date(expiryIso).getTime();
+
+        for (const event of res.data) {
+            for (const market of event.markets) {
+                const mEnd = new Date(market.endDate).getTime();
+                
+                // Check if expiry matches our target bucket (Tolerance: +/- 60s)
+                // Polymarket sometimes shifts seconds, so we need a small buffer.
+                if (Math.abs(mEnd - targetTime) < 60000) {
+                     
+                     // Secondary Validation: Ensure it's a binary Price market
+                     // (Simple heuristic: 2 outcomes, clobTokenIds present)
+                     if (market.outcomes && JSON.parse(market.outcomes).length === 2) {
+                         return market;
+                     }
+                }
+            }
+        }
+    } catch (err) {
+        Logger.error(`[POLY_API] Discovery failed for ${asset} @ ${expiryIso}`, err);
+    }
+    return null;
   }
 
   /**

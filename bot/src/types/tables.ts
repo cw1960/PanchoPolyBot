@@ -51,6 +51,7 @@ export interface TestRun {
   name: string;
   status: 'PLANNED' | 'RUNNING' | 'COMPLETED';
   params: ExperimentParams;
+  ai_report?: string; // Markdown report from Gemini
 }
 
 export interface TradeEventRow {

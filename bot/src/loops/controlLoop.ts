@@ -4,13 +4,16 @@ import { MarketRegistry } from '../services/marketRegistry';
 import { Logger } from '../utils/logger';
 import { ENV } from '../config/env';
 import { BotControl, Market, TestRun } from '../types/tables';
+import { MarketRotator } from '../services/marketRotator';
 
 export class ControlLoop {
   private registry: MarketRegistry;
+  private rotator: MarketRotator;
   private isRunning: boolean = false;
 
   constructor(registry: MarketRegistry) {
     this.registry = registry;
+    this.rotator = new MarketRotator();
   }
 
   public async start() {
@@ -34,6 +37,9 @@ export class ControlLoop {
 
   private async tick() {
     try {
+      // 0. Auto-Rotation Check (Runs independent of global stop, but respects config)
+      // Actually, if bot is globally stopped, we probably shouldn't rotate new markets in.
+      
       // 1. Fetch Global Control State
       const { data: controlData, error: controlError } = await supabase
         .from('bot_control')
@@ -56,6 +62,11 @@ export class ControlLoop {
           this.registry.stopAll();
         }
       } else if (desiredState === 'running') {
+        
+        // --- AUTO ROTATION INJECTION ---
+        // We run the rotator here to ensure it keeps the DB populated with the active market
+        await this.rotator.tick();
+
         // 3. Fetch Active Markets
         const { data: marketsData, error: marketsError } = await supabase
           .from('markets')

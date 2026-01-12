@@ -3,6 +3,7 @@ import { validateEnv } from './config/env';
 import { ControlLoop } from './loops/controlLoop';
 import { MarketRegistry } from './services/marketRegistry';
 import { HeartbeatService } from './services/heartbeat';
+import { AnalysisLoop } from './loops/analysisLoop';
 import { logEvent, supabase } from './services/supabase';
 import { Logger } from './utils/logger';
 
@@ -16,15 +17,14 @@ async function main() {
   const registry = new MarketRegistry();
   const controlLoop = new ControlLoop(registry);
   const heartbeat = new HeartbeatService();
+  const analysisLoop = new AnalysisLoop();
 
   // 3. Start Lifecycle
   await logEvent('INFO', 'VPS Process Started');
   
-  // NOTE: Removed global exposure reset. Exposure is now scoped by run_id in MarketLoop.
-  // This allows the bot to restart without wiping state for active runs.
-  
   heartbeat.start(() => registry.getActiveCount());
   await controlLoop.start();
+  await analysisLoop.start();
 
   // 4. Handle Shutdown Gracefully
   const shutdown = async () => {
@@ -32,6 +32,7 @@ async function main() {
     await logEvent('WARN', 'VPS Process Stopping...');
     controlLoop.stop();
     heartbeat.stop();
+    analysisLoop.stop();
     registry.stopAll();
     (process as any).exit(0);
   };
