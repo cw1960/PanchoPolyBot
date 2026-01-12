@@ -228,14 +228,28 @@ export class EdgeEngine {
         calculatedProbability = this.getNormalCDF(z);
     }
 
-    // 7. Implied Probability (VWAP of Order Book)
+    // 7. Order Book Data
     let impliedProbability = 0;
+    let orderBookSnapshot = undefined;
+    
     const tokens = await polymarket.getTokens(market.polymarket_market_id);
     if (tokens) {
         const tokenId = direction === 'UP' ? tokens.up : tokens.down;
-        // Use VWAP for liquidity guard
-        const vwapAsk = await polymarket.getVWAPAsk(tokenId, targetTradeSize);
+        
+        // Parallel fetch for Depth and VWAP to avoid double waiting
+        const [vwapAsk, depth] = await Promise.all([
+             polymarket.getVWAPAsk(tokenId, targetTradeSize),
+             polymarket.getMarketDepth(tokenId)
+        ]);
+        
         if (vwapAsk) impliedProbability = vwapAsk;
+        if (depth) {
+            orderBookSnapshot = {
+                bestBid: depth.bestBid,
+                bestAsk: depth.bestAsk,
+                spread: depth.bestAsk - depth.bestBid
+            };
+        }
     }
 
     // 8. Confidence Mapping
@@ -253,7 +267,8 @@ export class EdgeEngine {
       impliedProbability,
       timeToExpiryMs: timeRemaining,
       isSafeToTrade,
-      regime
+      regime,
+      orderBook: orderBookSnapshot
     };
   }
 

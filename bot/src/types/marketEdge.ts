@@ -24,4 +24,11 @@ export interface MarketObservation {
   
   // Market State Tag
   regime: 'LOW_VOL' | 'NORMAL' | 'HIGH_VOL' | 'UNKNOWN';
+
+  // Order Book Snapshot for Maker Logic
+  orderBook?: {
+      bestBid: number;
+      bestAsk: number;
+      spread: number;
+  };
 }

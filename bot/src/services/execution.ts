@@ -9,50 +9,98 @@ import { feeModel } from './feeModel';
 import { TradeLogger } from './tradeLogger';
 import { pnlLedger } from './pnlLedger';
 
+export type ExecutionMode = 'AGGRESSIVE' | 'PASSIVE';
+
+export interface ScalingMetadata {
+    tierLevel: number;
+    clipIndex: number;
+    scalingFactor: number;
+    tradeSizeOverride: number;
+    mode?: ExecutionMode; // Execution Mode request
+}
+
 export class ExecutionService {
   
   private static readonly MAX_ENTRY_PRICE_DEFAULT = 0.95;
 
-  public async attemptTrade(market: Market, obs: MarketObservation, currentExposure: number): Promise<{ executed: boolean, simulated?: boolean, newExposure: number }> {
+  public async attemptTrade(
+      market: Market, 
+      obs: MarketObservation, 
+      currentExposure: number,
+      scalingMeta?: ScalingMetadata
+    ): Promise<{ executed: boolean, simulated?: boolean, newExposure: number }> {
+    
     const contextId = `EXEC-${Date.now()}`;
     const mode = ENV.DRY_RUN ? 'DRY_RUN' : 'LIVE';
     
     const run = market._run;
     const expParams = run?.params || {};
-    
-    // PRIORITY: Experiment Param -> Risk Governor Default
+    const executionMode: ExecutionMode = scalingMeta?.mode || 'AGGRESSIVE';
+
+    // SIZE LOGIC
     let betSizeUSDC: number;
-    if (expParams.tradeSize && expParams.tradeSize > 0) {
+    if (scalingMeta) {
+        betSizeUSDC = scalingMeta.tradeSizeOverride;
+    } else if (expParams.tradeSize && expParams.tradeSize > 0) {
         betSizeUSDC = expParams.tradeSize;
     } else {
         betSizeUSDC = riskGovernor.calculateBetSize();
-        // Log this fallback so we know why it's happening
-        if (run) Logger.warn(`[${contextId}] Fallback to Default Bet Size ($${betSizeUSDC}) - 'tradeSize' missing in run params.`);
     }
 
     const maxExposure = expParams.maxExposure || market.max_exposure || 50;
-    const directionMode = expParams.direction || 'BOTH';
     const confidenceThreshold = expParams.confidenceThreshold || 0.60;
-    
-    // Price at which we are willing to enter (limit price)
     const entryLimitPrice = market.max_entry_price || ExecutionService.MAX_ENTRY_PRICE_DEFAULT;
     
-    // Calculate expected metrics
-    const metrics = feeModel.calculateMetrics(entryLimitPrice, obs.confidence, betSizeUSDC);
+    // PRICE LOGIC (Maker vs Taker)
+    let executionPrice = entryLimitPrice;
+    let isMaker = false;
+    let spreadAtPlacement = 0;
+
+    if (executionMode === 'PASSIVE' && obs.orderBook) {
+        // Passive: Aim to join or improve best bid, but stay below best ask
+        const { bestBid, bestAsk } = obs.orderBook;
+        spreadAtPlacement = bestAsk - bestBid;
+
+        const makerPrice = this.calculateMakerPrice(bestBid, bestAsk);
+        
+        // Fallback constraint: If maker price calculation fails or book is crossed, default to aggressive cap or abort?
+        // Logic: if makerPrice >= bestAsk, we are crossing spread (Taking).
+        // Since we wanted PASSIVE, we should ideally back off, but for now we clamp to (BestAsk - tick) if possible.
+        if (makerPrice < bestAsk) {
+            executionPrice = makerPrice;
+            isMaker = true;
+        } else {
+            // Safety: If spread is closed, we cannot be passive.
+            // Since mode was requested as PASSIVE, we should technically SKIP.
+            // However, to ensure execution flow in simple bot, we might clip it.
+            // Strict Maker Rule:
+            Logger.info(`[EXEC] Passive mode requested but spread too tight (Bid:${bestBid} Ask:${bestAsk}). Skipping.`);
+            return { executed: false, newExposure: currentExposure };
+        }
+    } else {
+        // AGGRESSIVE: Marketable Limit Order (Best Ask or Limit)
+        // We stick to entryLimitPrice (Max willingness to pay), enabling Taker fill if BestAsk < entryLimitPrice
+        if (obs.orderBook && obs.orderBook.bestAsk > entryLimitPrice) {
+            // Price is too high even for Taker
+            Logger.info(`[EXEC] Price too high. BestAsk: ${obs.orderBook.bestAsk} > Limit: ${entryLimitPrice}`);
+            return { executed: false, newExposure: currentExposure };
+        }
+    }
     
-    // COMPREHENSIVE SIGNAL LOGGING
+    const metrics = feeModel.calculateMetrics(executionPrice, obs.confidence, betSizeUSDC);
+    
     const signalSnapshot = {
         baseline_price: market.baseline_price,
-        t_open: market.t_open,
-        t_expiry: market.t_expiry,
         time_remaining_ms: obs.timeToExpiryMs,
         spot_price: obs.spot.price,
         delta: obs.delta,
-        implied_probability: obs.impliedProbability,
-        model_probability: obs.calculatedProbability,
-        z_score: obs.calculatedProbability ? (obs.calculatedProbability - 0.5) * 2 : 0, 
+        model_prob: obs.calculatedProbability,
         direction: obs.direction,
-        regime: obs.regime
+        regime: obs.regime,
+        tier: scalingMeta?.tierLevel,
+        clip: scalingMeta?.clipIndex,
+        book_bid: obs.orderBook?.bestBid,
+        book_ask: obs.orderBook?.bestAsk
     };
 
     const eventPayload: TradeEventRow = {
@@ -62,7 +110,7 @@ export class ExecutionService {
       asset: market.asset,
       side: obs.direction,
       stake_usd: betSizeUSDC,
-      entry_prob: entryLimitPrice,
+      entry_prob: executionPrice,
       confidence: obs.confidence,
       edge_after_fees_pct: metrics.edgePct,
       ev_after_fees_usd: metrics.evUsd,
@@ -74,77 +122,71 @@ export class ExecutionService {
       status: 'INTENDED',
       decision_reason: 'ANALYZING',
       outcome: 'OPEN',
-      context: { mode, dry_run: ENV.DRY_RUN }
+      context: { mode, dry_run: ENV.DRY_RUN, scaling: scalingMeta, executionMode, isMaker }
     };
 
-    // 1. DIRECTION CHECK
-    const sideToBuy = obs.direction === 'UP' ? 'UP' : 'DOWN';
-    if (directionMode !== 'BOTH' && directionMode !== sideToBuy) {
-        return { executed: false, newExposure: currentExposure };
-    }
-
-    // 2. CONFIDENCE CHECK
+    // 1. CONFIDENCE CHECK
     if (obs.confidence < confidenceThreshold) {
-      TradeLogger.log({ 
-          ...eventPayload, 
-          status: 'SKIPPED', 
-          decision_reason: 'CONFIDENCE_TOO_LOW' 
-      });
-      return { executed: false, newExposure: currentExposure };
+       if (!scalingMeta) {
+           TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'CONFIDENCE_TOO_LOW' });
+           return { executed: false, newExposure: currentExposure };
+       }
     }
 
-    // 3. EXPOSURE CHECK
-    // In DRY_RUN, we bypass this local check to allow the RiskGovernor to log the bypass event.
-    // In LIVE, we strictly enforce it here.
+    // 2. EXPOSURE CHECK
     if (!ENV.DRY_RUN && (currentExposure + betSizeUSDC > maxExposure)) {
-      TradeLogger.log({ 
-          ...eventPayload, 
-          status: 'SKIPPED', 
-          decision_reason: 'MAX_EXPOSURE_HIT' 
-      });
+      TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'MAX_EXPOSURE_HIT' });
       return { executed: false, newExposure: currentExposure };
     }
 
-    // 4. RISK APPROVAL
+    // 3. RISK APPROVAL
     const approved = await riskGovernor.requestApproval(market, betSizeUSDC, currentExposure);
     if (!approved) {
-      TradeLogger.log({ 
-          ...eventPayload, 
-          status: 'SKIPPED', 
-          decision_reason: 'RISK_VETO' 
-      });
+      TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'RISK_VETO' });
       return { executed: false, newExposure: currentExposure };
     }
 
-    // 5. RESOLVE TOKENS
+    // 4. RESOLVE TOKENS
     const tokens = await polymarket.getTokens(market.polymarket_market_id);
     if (!tokens) {
-      TradeLogger.log({ 
-          ...eventPayload, 
-          status: 'SKIPPED', 
-          decision_reason: 'TOKEN_RESOLVE_FAIL', 
-          error: 'Tokens not found' 
-      });
+      TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'TOKEN_RESOLVE_FAIL', error: 'Tokens not found' });
       return { executed: false, newExposure: currentExposure };
     }
+    const sideToBuy = obs.direction === 'UP' ? 'UP' : 'DOWN';
     const tokenId = sideToBuy === 'UP' ? tokens.up : tokens.down;
-    const shares = Number((betSizeUSDC / entryLimitPrice).toFixed(2));
+    const shares = Number((betSizeUSDC / executionPrice).toFixed(2));
 
-    Logger.info(`[${contextId}] EXEC ${sideToBuy}: ${betSizeUSDC} USDC @ ${entryLimitPrice} | Model: ${(obs.calculatedProbability!*100).toFixed(1)}%`);
+    Logger.info(`[${contextId}] EXEC ${sideToBuy} (${executionMode}): ${betSizeUSDC} USDC @ ${executionPrice.toFixed(3)} (Tier ${scalingMeta?.tierLevel || 0})`);
 
     try {
       if (ENV.DRY_RUN) {
+          // DRY RUN SIMULATION
+          // If Passive/Maker, we must simulate fill probability.
+          if (executionMode === 'PASSIVE') {
+               // Probabilistic Fill Simulation
+               // Factors: Spread tightness, volatility (regime), and random luck.
+               // Simple Heuristic: 40% chance of fill per tick if improving bid.
+               const fillRoll = Math.random();
+               const fillThreshold = 0.40; // 40% chance
+               
+               if (fillRoll > fillThreshold) {
+                   Logger.info(`[DRY_RUN] Passive Order NOT Filled (Roll: ${fillRoll.toFixed(2)} > ${fillThreshold})`);
+                   // Return FALSE execution so MarketLoop knows it failed
+                   return { executed: false, newExposure: currentExposure };
+               } else {
+                   Logger.info(`[DRY_RUN] Passive Order FILLED (Simulated)`);
+               }
+          }
+
           await new Promise(r => setTimeout(r, 200)); 
           
           TradeLogger.log({ 
             ...eventPayload, 
             status: 'EXECUTED', 
             decision_reason: 'DRY_RUN_EXEC',
-            context: { orderId: 'DRY-RUN-ID', shares, filledPrice: entryLimitPrice, mode, dry_run: true }
+            context: { orderId: 'DRY-RUN-ID', shares, filledPrice: executionPrice, mode, dry_run: true, scaling: scalingMeta, executionMode, isMaker }
           });
           
-          // NEW: RECORD LEDGER ENTRY
-          // Note: UP = YES, DOWN = NO
           const ledgerSide = sideToBuy === 'UP' ? 'YES' : 'NO';
           if (market.active_run_id) {
               await pnlLedger.recordOpenTrade({
@@ -154,50 +196,61 @@ export class ExecutionService {
                   mode: 'DRY_RUN',
                   side: ledgerSide,
                   size_usd: betSizeUSDC,
-                  entry_price: entryLimitPrice,
+                  entry_price: executionPrice,
                   status: 'OPEN',
                   realized_pnl: 0,
                   unrealized_pnl: 0,
                   opened_at: new Date().toISOString(),
-                  // METADATA INJECTION FOR AI ANALYSIS
                   metadata: {
                       confidence: obs.confidence,
                       regime: obs.regime,
-                      delta: obs.delta,
-                      implied_prob: obs.impliedProbability
+                      tier: scalingMeta?.tierLevel,
+                      clip: scalingMeta?.clipIndex,
+                      executionMode,
+                      isMaker,
+                      spreadAtPlacement
                   }
               });
           }
 
-          // DO NOT LOG EXPOSURE CONSUME
           return { executed: false, simulated: true, newExposure: currentExposure };
       }
 
       // LIVE EXECUTION
-      const orderId = await polymarket.placeOrder(tokenId, 'BUY', entryLimitPrice, shares);
+      const orderId = await polymarket.placeOrder(tokenId, 'BUY', executionPrice, shares);
       
       TradeLogger.log({ 
         ...eventPayload, 
         status: 'EXECUTED', 
         decision_reason: 'EXECUTED',
-        context: { orderId, shares, filledPrice: entryLimitPrice, mode, dry_run: false }
+        context: { orderId, shares, filledPrice: executionPrice, mode, dry_run: false, scaling: scalingMeta, executionMode, isMaker }
       });
       
-      // LOG CRITICAL EXPOSURE CONSUMPTION
       Logger.info(`[EXPOSURE] CONSUME run=${market.active_run_id} market=${market.polymarket_market_id} +${betSizeUSDC}`);
 
+      // We bump exposure immediately even for Maker orders because funds are locked
       return { executed: true, newExposure: currentExposure + betSizeUSDC };
 
     } catch (err: any) {
       Logger.error(`[${contextId}] EXEC FAIL`, err);
-      TradeLogger.log({ 
-          ...eventPayload, 
-          status: 'SKIPPED', 
-          decision_reason: 'EXECUTION_ERROR', 
-          error: err.message
-      });
+      TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'EXECUTION_ERROR', error: err.message });
       return { executed: false, newExposure: currentExposure };
     }
+  }
+
+  /**
+   * Calculates a Passive Price (Maker).
+   * Strategy: Improve Best Bid by 1 tick (0.001), but do not cross Spread.
+   */
+  private calculateMakerPrice(bestBid: number, bestAsk: number): number {
+      const TICK_SIZE = 0.001; // Conservative tick
+      const target = bestBid + TICK_SIZE;
+      
+      // Ensure we don't match/cross the ask (which would be Taker)
+      if (target >= bestAsk) {
+          return bestBid; // Just join the bid if spread is 1 tick
+      }
+      return target;
   }
 }
 

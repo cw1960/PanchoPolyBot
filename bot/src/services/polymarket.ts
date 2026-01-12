@@ -1,5 +1,4 @@
 
-
 import { ethers } from 'ethers';
 import { ClobClient, Side } from '@polymarket/clob-client';
 import { ENV } from '../config/env';
@@ -94,9 +93,6 @@ class PolymarketService {
   /**
    * Finds a specific 15-minute market for an asset that matches the given expiry time.
    * This is used by the Auto-Rotator to discover the correct market slug.
-   * 
-   * @param asset 'BTC' or 'ETH'
-   * @param expiryIso ISO String of the target bucket end time (e.g., "2023-10-27T12:15:00.000Z")
    */
   public async findMarketForAssetAndExpiry(asset: string, expiryIso: string): Promise<any | null> {
     const keyword = asset === 'BTC' ? 'Bitcoin' : asset === 'ETH' ? 'Ethereum' : asset;
@@ -128,6 +124,27 @@ class PolymarketService {
         Logger.error(`[POLY_API] Discovery failed for ${asset} @ ${expiryIso}`, err);
     }
     return null;
+  }
+
+  /**
+   * Fetches Top of Book (Best Bid / Best Ask) for a token.
+   * critical for Maker logic.
+   */
+  public async getMarketDepth(tokenId: string): Promise<{ bestBid: number, bestAsk: number } | null> {
+      if (!this.client) return null;
+      try {
+          const book = await this.client.getOrderBook(tokenId);
+          
+          let bestAsk = 0;
+          let bestBid = 0;
+
+          if (book.asks.length > 0) bestAsk = parseFloat(book.asks[0].price);
+          if (book.bids.length > 0) bestBid = parseFloat(book.bids[0].price);
+          
+          return { bestBid, bestAsk };
+      } catch (e) {
+          return null;
+      }
   }
 
   /**
