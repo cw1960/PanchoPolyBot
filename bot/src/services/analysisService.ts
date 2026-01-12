@@ -11,6 +11,15 @@ export interface ConfidenceBucketStat {
   win_rate: number;
 }
 
+export interface ExitAnalysisStat {
+  type: 'DEFENSIVE' | 'EXPIRY' | 'MANUAL';
+  trade_count: number;
+  total_pnl: number;
+  win_rate: number;
+  avg_pnl: number;
+  avg_time_remaining_min?: number; // Only relevant for defensive
+}
+
 export interface RunSummary {
   run_id: string;
   mode: string;
@@ -25,6 +34,7 @@ export interface RunSummary {
 export interface AnalysisReport {
   summary: RunSummary;
   confidence_buckets: ConfidenceBucketStat[];
+  exit_stats?: ExitAnalysisStat[];
   regime_stats?: any[]; 
 }
 
@@ -69,8 +79,8 @@ export class AnalysisService {
     REQUIRED SECTIONS:
     1. Executive Summary (Data-Bound, 1 paragraph)
     2. Confidence Analysis (Profitability by bucket, concentration)
-    3. Regime Sensitivity (Performance by regime)
-    4. Drawdown & Risk Observations
+    3. Exit Analysis (Critical: Compare Defensive Exits vs Expiry. Did defensive exits save money?)
+    4. Regime Sensitivity (Performance by regime)
     5. Hypotheses (Max 3, clearly labeled "Hypothesis: ...")
     6. Data Gaps & Limitations
     `;
@@ -158,7 +168,42 @@ export class AnalysisService {
         win_rate: b.stats.trades > 0 ? parseFloat((b.stats.wins / b.stats.trades).toFixed(2)) : 0
     })).filter(b => b.trades > 0); // Only return active buckets
 
-    // 4. (Optional) Regime Stats
+    // 4. EXIT ANALYSIS (Defensive vs Expiry)
+    const exitStats: ExitAnalysisStat[] = [];
+    
+    // Identify defensive trades by presence of 'exit_reason' in metadata
+    // Identify expiry trades by 'settlement_reason' === 'EXPIRY'
+    const defensiveTrades = trades.filter(t => t.metadata?.exit_reason);
+    const expiryTrades = trades.filter(t => t.metadata?.settlement_reason === 'EXPIRY');
+    
+    const calcExitStats = (subset: any[], type: 'DEFENSIVE' | 'EXPIRY'): ExitAnalysisStat | null => {
+        if (subset.length === 0) return null;
+        const subTotal = subset.reduce((sum, t) => sum + (t.realized_pnl || 0), 0);
+        const subWins = subset.filter(t => (t.realized_pnl || 0) > 0).length;
+        
+        let avgTimeRemaining = 0;
+        if (type === 'DEFENSIVE') {
+            const sumTime = subset.reduce((acc, t) => acc + (t.metadata?.exit_details?.timeRemaining || 0), 0);
+            avgTimeRemaining = (sumTime / subset.length) / 60000; // Minutes
+        }
+
+        return {
+            type,
+            trade_count: subset.length,
+            total_pnl: parseFloat(subTotal.toFixed(2)),
+            win_rate: parseFloat((subWins / subset.length).toFixed(2)),
+            avg_pnl: parseFloat((subTotal / subset.length).toFixed(2)),
+            avg_time_remaining_min: type === 'DEFENSIVE' ? parseFloat(avgTimeRemaining.toFixed(1)) : undefined
+        };
+    };
+
+    const defStat = calcExitStats(defensiveTrades, 'DEFENSIVE');
+    if (defStat) exitStats.push(defStat);
+    
+    const expStat = calcExitStats(expiryTrades, 'EXPIRY');
+    if (expStat) exitStats.push(expStat);
+
+    // 5. (Optional) Regime Stats
     // Aggregates by regime tag ('LOW_VOL', 'NORMAL', 'HIGH_VOL')
     const regimeMap = new Map<string, { trades: number, pnl: number, wins: number }>();
     
@@ -185,6 +230,7 @@ export class AnalysisService {
     return {
         summary,
         confidence_buckets,
+        exit_stats: exitStats,
         regime_stats
     };
   }
