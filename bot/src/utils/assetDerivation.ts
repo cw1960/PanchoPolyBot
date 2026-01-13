@@ -1,4 +1,6 @@
 
+import { Asset } from '../types/assets';
+
 /**
  * PURE FUNCTION: strictly derives the asset symbol from the market slug.
  * 
@@ -10,15 +12,15 @@
  * 
  * THROWS on unknown or ambiguous slugs.
  */
-export function assetFromMarketSlug(slug: string): 'BTC' | 'ETH' | 'SOL' | 'XRP' {
+export function assetFromMarketSlug(slug: string): Asset {
     if (!slug) throw new Error("[ASSET_DERIVATION] Slug is empty or undefined");
     
     const s = slug.toLowerCase().trim();
     
-    if (s.startsWith('btc-')) return 'BTC';
-    if (s.startsWith('eth-')) return 'ETH';
-    if (s.startsWith('sol-')) return 'SOL';
-    if (s.startsWith('xrp-')) return 'XRP';
+    if (s.startsWith('btc-')) return Asset.BTC;
+    if (s.startsWith('eth-')) return Asset.ETH;
+    if (s.startsWith('sol-')) return Asset.SOL;
+    if (s.startsWith('xrp-')) return Asset.XRP;
     
     throw new Error(`[ASSET_DERIVATION] FAILED: Unknown asset for slug '${slug}'. Logic requires btc-, eth-, sol-, or xrp- prefix.`);
 }

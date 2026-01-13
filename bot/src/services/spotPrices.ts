@@ -1,11 +1,13 @@
 
 import axios from 'axios';
 import { Logger } from '../utils/logger';
+import { Asset } from '../types/assets';
 
 export class SpotPriceService {
   
-  public async getSpotPrice(asset: string): Promise<number | null> {
-    const sym = asset.toUpperCase();
+  public async getSpotPrice(asset: Asset): Promise<number | null> {
+    // Enum is string-based, so this works, but we enforce strictness at call site
+    const sym = asset.toString().toUpperCase();
     const prices: number[] = [];
 
     // 1. Binance
@@ -34,8 +36,15 @@ export class SpotPriceService {
    * Fetches the first trade at or after timestamp.
    * Uses Binance AggTrades for high precision.
    */
-  public async getHistoricalTrade(asset: string, timestampMs: number): Promise<{ price: number, time: number } | null> {
-      const sym = asset === 'ETH' ? 'ETHUSDT' : 'BTCUSDT';
+  public async getHistoricalTrade(asset: Asset, timestampMs: number): Promise<{ price: number, time: number } | null> {
+      // Map Asset Enum to specific Binance Symbols if needed
+      let sym = '';
+      if (asset === Asset.BTC) sym = 'BTCUSDT';
+      else if (asset === Asset.ETH) sym = 'ETHUSDT';
+      else if (asset === Asset.SOL) sym = 'SOLUSDT';
+      else if (asset === Asset.XRP) sym = 'XRPUSDT';
+      else throw new Error(`[SPOT] Unsupported asset for historical lookup: ${asset}`);
+
       try {
           // fetch trades starting at timestamp
           const url = `https://api.binance.com/api/v3/aggTrades?symbol=${sym}&startTime=${timestampMs}&limit=1`;

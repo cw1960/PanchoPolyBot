@@ -7,6 +7,7 @@ import { Logger } from '../utils/logger';
 import { polymarket } from './polymarket';
 import { supabase } from './supabase';
 import { assetFromMarketSlug } from '../utils/assetDerivation';
+import { Asset } from '../types/assets';
 
 export class EdgeEngine {
   private chainlink: ChainlinkService;
@@ -109,7 +110,7 @@ export class EdgeEngine {
             
             // Get trade at or immediately after t_open
             // STRICT ASSET DERIVATION - NO DEFAULTS
-            let derivedAsset: string;
+            let derivedAsset: Asset;
             try {
                 derivedAsset = assetFromMarketSlug(market.polymarket_market_id);
             } catch (e) {
@@ -164,7 +165,7 @@ export class EdgeEngine {
     if (!isReady || !market.baseline_price || !market.t_expiry) return null;
 
     // --- CRITICAL FIX: STRICT ASSET DERIVATION ---
-    let asset: string;
+    let asset: Asset;
     try {
         asset = assetFromMarketSlug(market.polymarket_market_id);
     } catch (e: any) {
