@@ -147,10 +147,20 @@ export const Dashboard: React.FC = () => {
   }, [activeTestRunId]);
 
   const fetchBotStatus = async () => {
-      const { data: heartbeat } = await supabase.from('bot_heartbeats').select('*').limit(1).single();
+      // Robust Fetch: Get most recent heartbeat if multiple exist
+      const { data: heartbeat, error } = await supabase
+          .from('bot_heartbeats')
+          .select('*')
+          .order('last_seen', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+      if (error) {
+          console.error("Error fetching bot status:", error.message);
+      }
       if (heartbeat) setBotHeartbeat(heartbeat);
 
-      const { data: control } = await supabase.from('bot_control').select('desired_state').single();
+      const { data: control } = await supabase.from('bot_control').select('desired_state').maybeSingle();
       if (control) setDesiredState(control.desired_state);
   }
 
