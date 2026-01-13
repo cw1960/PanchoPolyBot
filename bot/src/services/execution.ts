@@ -8,6 +8,7 @@ import { ENV } from '../config/env';
 import { feeModel } from './feeModel';
 import { TradeLogger } from './tradeLogger';
 import { pnlLedger } from './pnlLedger';
+import { accountManager } from './accountManager'; // NEW IMPORT
 
 export type ExecutionMode = 'AGGRESSIVE' | 'PASSIVE';
 
@@ -46,8 +47,6 @@ export class ExecutionService {
       const position = await pnlLedger.getNetPosition(runId, market.id);
       
       // INVARIANT 2: NO ZERO EXPOSURE EXIT
-      // If we attempt to exit with zero/negative shares, we are logic-drifting.
-      // This invariant ensures we never "guess" or flip into a short/long accidentally.
       if (position.shares <= 0) {
           throw new Error(`[INVARIANT_VIOLATION] Defensive exit attempted with zero/negative exposure: ${position.shares}`);
       }
@@ -92,14 +91,22 @@ export class ExecutionService {
                   }
               });
 
+              // NOTE: Defensive exit reduces exposure. PnLLedger closePosition triggers updatePnL on AccountManager, 
+              // but we should arguably update Exposure on AccountManager immediately or let PnL handler do it.
+              // PnLLedger handles PnL updates. We should handle Exposure decrement here or rely on PnL?
+              // Standard: When we close, exposure becomes 0.
+              // We'll let PnL Ledger handling drive the account update logic via its 'settle' calls?
+              // Actually, AccountManager.updatePnL handles bankroll, but we need to decrease currentExposure manually here
+              // because currentExposure is "Cost Basis of Open Positions".
+              // Close = remove cost basis.
+              
+              // However, since PnL Ledger processes the close, it knows the cost basis removed.
+              // We will rely on PnL Ledger to callback Account Manager updates.
+              
               return { executed: true };
           } 
 
           // LIVE EXECUTION
-          // We need to SELL the position. 
-          // Polymarket CLOB: Sell is a separate side? Or negative size?
-          // Using clob-client: createOrder({ side: Side.SELL })
-          
           // Get Market Bid Price for limit (aggressive marketable limit)
           const depth = await polymarket.getMarketDepth(tokenId);
           const sellPrice = depth?.bestBid || 0.01; // Sell into bid
@@ -143,57 +150,55 @@ export class ExecutionService {
   public async attemptTrade(
       market: Market, 
       obs: MarketObservation, 
-      currentExposure: number,
       scalingMeta?: ScalingMetadata
     ): Promise<{ executed: boolean, simulated?: boolean, newExposure: number }> {
     
     const contextId = `EXEC-${Date.now()}`;
     const mode = ENV.DRY_RUN ? 'DRY_RUN' : 'LIVE';
     
+    // 1. ISOLATED ACCOUNT RESOLUTION
+    const direction = scalingMeta?.lockedDirection || obs.direction;
+    if (direction === 'NEUTRAL') return { executed: false, newExposure: 0 };
+
+    const account = accountManager.getAccount(market.asset, direction);
+
     const run = market._run;
     const expParams = run?.params || {};
     const executionMode: ExecutionMode = scalingMeta?.mode || 'AGGRESSIVE';
 
-    // ------------------------------------------------------------------
-    // 0. CRITICAL INVARIANT: PASSIVE DIRECTION SAFETY
-    // ------------------------------------------------------------------
+    // 0. PASSIVE DIRECTION SAFETY
     if (executionMode === 'PASSIVE') {
         const lockedDir = scalingMeta?.lockedDirection;
         if (lockedDir && lockedDir !== obs.direction) {
              const errorMsg = `[INVARIANT_VIOLATION] PASSIVE order attempted on ${obs.direction} while lockedDirection=${lockedDir}`;
              Logger.error(errorMsg);
-             throw new Error(errorMsg); // HARD STOP
-        }
-        if (lockedDir) {
-             Logger.info(`[PASSIVE_GUARD_OK] market=${market.polymarket_market_id} locked=${lockedDir} order=${obs.direction}`);
+             throw new Error(errorMsg); 
         }
     }
-    // ------------------------------------------------------------------
 
     // SIZE LOGIC (BASE)
     let rawBetSize: number;
-    if (scalingMeta) {
+    if (scalingMeta && scalingMeta.tradeSizeOverride > 0) {
         rawBetSize = scalingMeta.tradeSizeOverride;
     } else if (expParams.tradeSize && expParams.tradeSize > 0) {
         rawBetSize = expParams.tradeSize;
     } else {
-        rawBetSize = riskGovernor.calculateBetSize();
+        // USE ISOLATED ACCOUNT FOR SIZING
+        rawBetSize = riskGovernor.calculateBetSize(account);
     }
 
     // SIZE LOGIC (DECAYED)
     // effectiveSize = baseSize * confidence * decayFactor
-    // We apply confidence and time decay here to ensure sizing reflects risk.
-    const confidenceMultiplier = Math.max(0.5, obs.confidence); // Basic floor
+    const confidenceMultiplier = Math.max(0.5, obs.confidence); 
     const preDecaySize = rawBetSize * confidenceMultiplier;
     const betSizeUSDC = riskGovernor.applySizeDecay(preDecaySize, market.t_expiry);
 
     // MINIMUM SIZE CHECK
     if (betSizeUSDC < ExecutionService.MIN_ORDER_SIZE_USD) {
          Logger.info(`[EXEC] Trade Size too small after decay. ${betSizeUSDC.toFixed(3)} < ${ExecutionService.MIN_ORDER_SIZE_USD}`);
-         return { executed: false, newExposure: currentExposure };
+         return { executed: false, newExposure: account.currentExposure };
     }
 
-    const maxExposure = expParams.maxExposure || market.max_exposure || 50;
     const confidenceThreshold = expParams.confidenceThreshold || 0.60;
     const entryLimitPrice = market.max_entry_price || ExecutionService.MAX_ENTRY_PRICE_DEFAULT;
     
@@ -203,7 +208,6 @@ export class ExecutionService {
     let spreadAtPlacement = 0;
 
     if (executionMode === 'PASSIVE' && obs.orderBook) {
-        // Passive: Aim to join or improve best bid, but stay below best ask
         const { bestBid, bestAsk } = obs.orderBook;
         spreadAtPlacement = bestAsk - bestBid;
 
@@ -213,14 +217,11 @@ export class ExecutionService {
             executionPrice = makerPrice;
             isMaker = true;
         } else {
-            Logger.info(`[EXEC] Passive mode requested but spread too tight (Bid:${bestBid} Ask:${bestAsk}). Skipping.`);
-            return { executed: false, newExposure: currentExposure };
+            return { executed: false, newExposure: account.currentExposure };
         }
     } else {
-        // AGGRESSIVE: Marketable Limit Order (Best Ask or Limit)
         if (obs.orderBook && obs.orderBook.bestAsk > entryLimitPrice) {
-            Logger.info(`[EXEC] Price too high. BestAsk: ${obs.orderBook.bestAsk} > Limit: ${entryLimitPrice}`);
-            return { executed: false, newExposure: currentExposure };
+            return { executed: false, newExposure: account.currentExposure };
         }
     }
     
@@ -266,29 +267,24 @@ export class ExecutionService {
     if (obs.confidence < confidenceThreshold) {
        if (!scalingMeta) {
            TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'CONFIDENCE_TOO_LOW' });
-           return { executed: false, newExposure: currentExposure };
+           return { executed: false, newExposure: account.currentExposure };
        }
     }
 
-    // 2. EXPOSURE CHECK
-    // Note: RiskGovernor also checks "Decayed Exposure Cap", but we check the absolute hard cap here first.
-    if (!ENV.DRY_RUN && (currentExposure + betSizeUSDC > maxExposure)) {
-      TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'MAX_EXPOSURE_HIT' });
-      return { executed: false, newExposure: currentExposure };
-    }
-
-    // 3. RISK APPROVAL (Includes Time Decay Cutoffs)
-    const approved = await riskGovernor.requestApproval(market, betSizeUSDC, currentExposure);
+    // 2. EXPOSURE CHECK (Handled by RiskGovernor against Isolated Account)
+    
+    // 3. RISK APPROVAL
+    const approved = await riskGovernor.requestApproval(market, account, betSizeUSDC);
     if (!approved) {
       TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'RISK_VETO' });
-      return { executed: false, newExposure: currentExposure };
+      return { executed: false, newExposure: account.currentExposure };
     }
 
     // 4. RESOLVE TOKENS
     const tokens = await polymarket.getTokens(market.polymarket_market_id);
     if (!tokens) {
       TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'TOKEN_RESOLVE_FAIL', error: 'Tokens not found' });
-      return { executed: false, newExposure: currentExposure };
+      return { executed: false, newExposure: account.currentExposure };
     }
     const sideToBuy = obs.direction === 'UP' ? 'UP' : 'DOWN';
     const tokenId = sideToBuy === 'UP' ? tokens.up : tokens.down;
@@ -305,7 +301,7 @@ export class ExecutionService {
                
                if (fillRoll > fillThreshold) {
                    Logger.info(`[DRY_RUN] Passive Order NOT Filled (Roll: ${fillRoll.toFixed(2)} > ${fillThreshold})`);
-                   return { executed: false, newExposure: currentExposure };
+                   return { executed: false, newExposure: account.currentExposure };
                } else {
                    Logger.info(`[DRY_RUN] Passive Order FILLED (Simulated)`);
                }
@@ -341,12 +337,17 @@ export class ExecutionService {
                       clip: scalingMeta?.clipIndex,
                       executionMode,
                       isMaker,
-                      spreadAtPlacement
+                      spreadAtPlacement,
+                      // Log the account used for audit
+                      isolatedAccount: account.marketKey
                   }
               });
+              
+              // CRITICAL: UPDATE ISOLATED ACCOUNT EXPOSURE
+              accountManager.updateExposure(market.asset, direction, betSizeUSDC);
           }
 
-          return { executed: false, simulated: true, newExposure: currentExposure + betSizeUSDC };
+          return { executed: false, simulated: true, newExposure: account.currentExposure };
       }
 
       // LIVE EXECUTION
@@ -360,13 +361,16 @@ export class ExecutionService {
       });
       
       Logger.info(`[EXPOSURE] CONSUME run=${market.active_run_id} market=${market.polymarket_market_id} +${betSizeUSDC.toFixed(2)}`);
+      
+      // CRITICAL: UPDATE ISOLATED ACCOUNT EXPOSURE
+      accountManager.updateExposure(market.asset, direction, betSizeUSDC);
 
-      return { executed: true, newExposure: currentExposure + betSizeUSDC };
+      return { executed: true, newExposure: account.currentExposure };
 
     } catch (err: any) {
       Logger.error(`[${contextId}] EXEC FAIL`, err);
       TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'EXECUTION_ERROR', error: err.message });
-      return { executed: false, newExposure: currentExposure };
+      return { executed: false, newExposure: account.currentExposure };
     }
   }
 

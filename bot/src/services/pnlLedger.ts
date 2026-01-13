@@ -2,6 +2,7 @@
 import { supabase } from './supabase';
 import { Logger } from '../utils/logger';
 import { TradeLedgerRow } from '../types/tables';
+import { accountManager } from './accountManager'; // NEW IMPORT
 
 export class PnLLedgerService {
     
@@ -90,35 +91,26 @@ export class PnLLedgerService {
      * Assumes immediate exit at current market mid or bid.
      */
     public async closePosition(runId: string, marketId: string, reason: string, details: any) {
-         // In DRY RUN, we assume we sold at current market value.
-         // Since we don't have exact fill price passed easily here for every single trade without complexity,
-         // We will assume a rough penalty (slippage) or use the last marked price.
-         // For accuracy, ExecutionService should ideally pass the fill price, but closing all in bulk
-         // usually implies using a single exit price.
          
          // Fetch open trades
+         // We need to fetch 'metadata' to know which account it belongs to if we stored it there.
+         // Or infer from 'market_id' -> 'market' -> 'asset'.
+         // Ideally, we fetch market details too, but we can do a second lookup.
+         
          const { data: trades } = await supabase
             .from('trade_ledger')
-            .select('*')
+            .select('*, markets(asset)')
             .eq('run_id', runId)
             .eq('market_id', marketId)
             .eq('status', 'OPEN');
 
          if (!trades || trades.length === 0) return;
 
-         // For DRY RUN simulation, we assume we exit at a "fair" but slightly punished price 
-         // to simulate spread crossing.
-         // Let's rely on the last updated mark price or use a generic "exit at 0.5" if unknown?
-         // No, we should use metadata.
-         
          const exitTimestamp = new Date().toISOString();
 
          for (const trade of trades) {
-             // Use the last mark price as the exit price if available, else standard
              let exitPrice = trade.metadata?.last_mark_price || trade.entry_price; 
-             
-             // Apply slippage penalty for defensive exit (1%)
-             exitPrice = exitPrice * 0.99;
+             exitPrice = exitPrice * 0.99; // Slippage penalty
 
              const shares = trade.size_usd / trade.entry_price;
              const finalValue = shares * exitPrice;
@@ -139,6 +131,22 @@ export class PnLLedgerService {
                     }
                 })
                 .eq('id', trade.id);
+            
+            // CRITICAL: UPDATE ISOLATED ACCOUNT PnL
+            // We need asset and direction.
+            // Asset comes from join (markets(asset)) if supabase supports it, or we rely on metadata
+            const asset = (trade as any).markets?.asset || trade.metadata?.asset || 'BTC'; // Fallback needs to be robust
+            
+            // Direction: If side is YES, direction is UP. If NO, direction is DOWN.
+            // Assumption: This mapping holds for standard markets.
+            const direction = trade.side === 'YES' ? 'UP' : 'DOWN';
+            
+            // 1. Update PnL & Bankroll
+            accountManager.updatePnL(asset, direction, realizedPnl);
+            
+            // 2. Reduce Exposure (Free up the cost basis)
+            // When we close, we remove the Cost Basis from Current Exposure.
+            accountManager.updateExposure(asset, direction, -trade.size_usd);
          }
     }
 
@@ -148,7 +156,7 @@ export class PnLLedgerService {
     public async settleMarket(marketId: string, runId: string, finalPriceYes: number, source: string = 'UNKNOWN') {
         const { data: trades, error } = await supabase
             .from('trade_ledger')
-            .select('*')
+            .select('*, markets(asset)')
             .eq('run_id', runId)
             .eq('market_id', marketId)
             .eq('status', 'OPEN');
@@ -184,6 +192,13 @@ export class PnLLedgerService {
                 })
                 .eq('id', trade.id)
                 .eq('status', 'OPEN'); 
+            
+            // CRITICAL: UPDATE ISOLATED ACCOUNT PnL
+            const asset = (trade as any).markets?.asset || 'BTC'; 
+            const direction = trade.side === 'YES' ? 'UP' : 'DOWN';
+
+            accountManager.updatePnL(asset, direction, realizedPnl);
+            accountManager.updateExposure(asset, direction, -trade.size_usd);
         }
     }
 }

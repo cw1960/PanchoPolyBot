@@ -9,6 +9,7 @@ import { supabase } from '../services/supabase';
 import { polymarket } from '../services/polymarket';
 import { pnlLedger } from '../services/pnlLedger';
 import { defensiveExitEvaluator } from '../services/defensiveExit';
+import { accountManager } from '../services/accountManager'; // Import Account Manager
 
 interface TierConfig {
     level: number;
@@ -20,8 +21,8 @@ interface TierConfig {
 
 interface ScalingState {
     lockedDirection: 'UP' | 'DOWN' | null;
-    entryRegime?: string;     // New: For Regime Invalidation checks
-    entryConfidence?: number; // New: For Thesis tracking
+    entryRegime?: string;     
+    entryConfidence?: number; 
     clipsPlaced: number;
     lastTierLevel: number;
     history: { conf: number; dir: string; ts: number }[];
@@ -32,22 +33,18 @@ export class MarketLoop {
   private intervalId: any | null = null;
   public market: Market; 
   private edgeEngine: EdgeEngine;
-  private currentExposure: number = 0; 
   private lastRunId: string | undefined = undefined;
   
   // INVARIANT 1: TERMINAL STATE FLAG
   private hasExitedDefensively: boolean = false;
 
-  // To handle external resets
   private lastWriteTime: number = 0;
-  private lastLogTime: number = 0; // Throttle idle logs
-  private lastPnlSyncTime: number = 0; // Throttle PnL checks
+  private lastLogTime: number = 0; 
+  private lastPnlSyncTime: number = 0; 
   private lastTradeTime: number = 0; 
   
-  // Price history for volatility calculation
   private priceHistory: { price: number, time: number }[] = [];
   
-  // SCALING STATE
   private scalingState: ScalingState = {
       lockedDirection: null,
       clipsPlaced: 0,
@@ -55,17 +52,14 @@ export class MarketLoop {
       history: []
   };
 
-  // CONSTANTS
   private readonly HISTORY_WINDOW_MS = 60000; 
   private readonly PNL_SYNC_INTERVAL_MS = 10000; 
 
-  // CONFIDENCE TIERS
-  // Strict progression: Must sustain higher confidence to add more risk.
   private readonly SCALING_PLAN: TierConfig[] = [
       { level: 1, minConf: 0.60, persistenceSamples: 3, windowSize: 5, sizeMult: 1.0 },
-      { level: 2, minConf: 0.70, persistenceSamples: 3, windowSize: 5, sizeMult: 1.0 }, // Add equal clip
-      { level: 3, minConf: 0.80, persistenceSamples: 4, windowSize: 6, sizeMult: 1.5 }, // Size up
-      { level: 4, minConf: 0.90, persistenceSamples: 5, windowSize: 8, sizeMult: 2.0 }, // High conviction
+      { level: 2, minConf: 0.70, persistenceSamples: 3, windowSize: 5, sizeMult: 1.0 }, 
+      { level: 3, minConf: 0.80, persistenceSamples: 4, windowSize: 6, sizeMult: 1.5 }, 
+      { level: 4, minConf: 0.90, persistenceSamples: 5, windowSize: 8, sizeMult: 2.0 }, 
   ];
 
   constructor(market: Market) {
@@ -77,12 +71,10 @@ export class MarketLoop {
   public async start() {
     if (this.active) return;
     
-    // 1. Fetch initial exposure & Hydrate Scaling State
-    await this.refreshExposure();
+    // No longer needing refreshExposure() from DB, we trust AccountManager
     await this.hydrateScalingState();
     
     this.active = true;
-    // Reset terminal flag on fresh start (lifecycle management)
     this.hasExitedDefensively = false;
 
     Logger.info(`[LOOP_START] Market: ${this.market.polymarket_market_id} | Dir: ${this.scalingState.lockedDirection || 'OPEN'} | Clips: ${this.scalingState.clipsPlaced}`);
@@ -92,10 +84,6 @@ export class MarketLoop {
     }, ENV.POLL_INTERVAL_MS);
   }
 
-  /**
-   * Reconstructs the state of this market (Direction, Clip Count) from the DB.
-   * Ensures we don't flip direction or double-count clips after a bot restart.
-   */
   private async hydrateScalingState() {
       if (!this.market.active_run_id) return;
       
@@ -108,40 +96,22 @@ export class MarketLoop {
           .order('created_at', { ascending: true });
 
       if (trades && trades.length > 0) {
-          // Lock direction to the first trade
           const firstTrade = trades[0];
           this.scalingState.lockedDirection = firstTrade.side as 'UP' | 'DOWN';
-          
-          // Attempt to restore entry regime/confidence from signals json if available
           if (firstTrade.signals) {
               this.scalingState.entryRegime = firstTrade.signals.regime;
-              // this.scalingState.entryConfidence = ... (might not be in signals flat, but that's okay, we can proceed without strict invalidation if missing)
           }
-
-          // Count executed clips
           this.scalingState.clipsPlaced = trades.length;
-          
-          // Estimate tier (naive: assume 1 trade = 1 tier level progressed)
           this.scalingState.lastTierLevel = trades.length;
           
           Logger.info(`[HYDRATE] Restored State for ${this.market.asset}: Locked=${this.scalingState.lockedDirection}, Clips=${this.scalingState.clipsPlaced}`);
       } else {
-          // Reset if fresh
           this.scalingState.lockedDirection = null;
           this.scalingState.clipsPlaced = 0;
           this.scalingState.lastTierLevel = 0;
           this.scalingState.entryRegime = undefined;
           this.scalingState.entryConfidence = undefined;
       }
-  }
-
-  private async refreshExposure() {
-      const { data } = await supabase
-        .from('market_state')
-        .select('exposure')
-        .eq('market_id', this.market.id)
-        .maybeSingle();
-      if (data) this.currentExposure = data.exposure || 0;
   }
 
   public stop(reason: string = 'MANUAL') {
@@ -152,7 +122,6 @@ export class MarketLoop {
         this.intervalId = null;
     }
     
-    // Explicit Audit Log for Terminal State
     if (this.hasExitedDefensively) {
         Logger.info(`[MARKET_LOOP_STOP] reason=DEFENSIVE_EXIT marketId=${this.market.id}`);
     } else {
@@ -176,54 +145,27 @@ export class MarketLoop {
     const run = this.market._run;
     if (!run || run.status !== 'RUNNING') return; 
 
-    // 1. Exposure Scope Enforcement & Natural Reset
+    // 1. Lifecycle Reset
     if (this.lastRunId !== run.id) {
         Logger.info(`[LOOP] New Run Detected: ${run.id}. Resetting Local State.`);
-        this.currentExposure = 0; 
         this.scalingState = { lockedDirection: null, clipsPlaced: 0, lastTierLevel: 0, history: [] };
         this.priceHistory = [];
         this.lastRunId = run.id;
         this.lastTradeTime = 0;
-        this.hasExitedDefensively = false; // Reset allowed on new run ID only
-        
-        await supabase.from('market_state').upsert({
-            market_id: this.market.id,
-            exposure: 0,
-            run_id: run.id,
-            status: 'WATCHING',
-            last_update: new Date().toISOString()
-        });
-    }
-
-    // 2. EXTERNAL RESET DETECTION
-    if (this.currentExposure > 0) {
-        const { data: remoteState } = await supabase
-           .from('market_state')
-           .select('exposure, last_update')
-           .eq('market_id', this.market.id)
-           .single();
-
-        if (remoteState && remoteState.last_update) {
-            const remoteTime = new Date(remoteState.last_update).getTime();
-            if (remoteState.exposure === 0 && remoteTime > this.lastWriteTime) {
-                Logger.info(`[LOOP] External Exposure Reset Detected. Local: ${this.currentExposure} -> 0`);
-                this.currentExposure = 0;
-                // Note: We do NOT reset scaling state (Direction Lock) on exposure reset, 
-                // because the market hypothesis usually remains valid until expiry.
-            }
-        }
+        this.hasExitedDefensively = false; 
     }
 
     try {
-      // 3. Observe
-      const baseTradeSize = run.params?.tradeSize || DEFAULTS.DEFAULT_BET_SIZE;
+      // 2. Observe
+      // Note: We don't have a "baseTradeSize" globally anymore, sizing is per-Account.
+      // But EdgeEngine needs a dummy size for VWAP calc.
       const observation = await this.edgeEngine.observe(
           this.market, 
           this.priceHistory,
-          baseTradeSize
+          10 // Dummy size for VWAP calc, real sizing happens later
       );
 
-      // 4. Check Expiration
+      // 3. Check Expiration
       if (this.market.t_expiry) {
           const expiryTime = new Date(this.market.t_expiry).getTime();
           if (Date.now() >= expiryTime) {
@@ -245,12 +187,10 @@ export class MarketLoop {
           return;
       }
 
-      // Update Local Histories
       this.priceHistory.push({ price: observation.spot.price, time: observation.timestamp });
       const cutoff = Date.now() - this.HISTORY_WINDOW_MS;
       this.priceHistory = this.priceHistory.filter(p => p.time > cutoff);
       
-      // Update Scaling History
       this.scalingState.history.push({ 
           conf: observation.confidence, 
           dir: observation.direction, 
@@ -258,13 +198,27 @@ export class MarketLoop {
       });
       if (this.scalingState.history.length > 20) this.scalingState.history.shift();
 
-      // 5. Determine Logic State
       let status: 'WATCHING' | 'OPPORTUNITY' | 'LOCKED' = 'WATCHING';
       if (!observation.isSafeToTrade) status = 'LOCKED';
 
-      // 6. DEFENSIVE EXIT EVALUATION
-      // Run this BEFORE Scaling Logic to prioritize capital protection
-      if (this.scalingState.lockedDirection && this.currentExposure > 0) {
+      // 4. RESOLVE ISOLATED ACCOUNT
+      // Logic: If locked, use locked direction. If not, use observed direction to check feasibility.
+      const directionKey = this.scalingState.lockedDirection || observation.direction;
+      
+      // Determine if we have capital/exposure for this specific bucket
+      // This is purely for reporting status in this tick, execution checks again strictly.
+      let currentAccountExposure = 0;
+      try {
+          if (directionKey !== 'NEUTRAL') {
+            const acc = accountManager.getAccount(this.market.asset, directionKey);
+            currentAccountExposure = acc.currentExposure;
+          }
+      } catch (e) {
+          // Can happen if direction is NEUTRAL or asset unknown
+      }
+
+      // 5. DEFENSIVE EXIT EVALUATION
+      if (this.scalingState.lockedDirection && currentAccountExposure > 0) {
           const exitDecision = defensiveExitEvaluator.shouldExit(
               observation,
               this.scalingState.history,
@@ -273,19 +227,18 @@ export class MarketLoop {
           );
 
           if (exitDecision) {
-              // TERMINAL BRANCH
               await this.executeDefensiveExit(exitDecision);
-              return; // Stop processing immediately
+              return; 
           }
       }
 
-      // 7. SCALING EVALUATION
+      // 6. SCALING EVALUATION
       if (status !== 'LOCKED') {
-          await this.evaluateScaling(observation, run.params?.cooldown || DEFAULTS.DEFAULT_COOLDOWN_MS, baseTradeSize);
+          await this.evaluateScaling(observation, run.params?.cooldown || DEFAULTS.DEFAULT_COOLDOWN_MS);
           if (this.scalingState.clipsPlaced > 0) status = 'OPPORTUNITY';
       }
 
-      // 8. PnL Sync
+      // 7. PnL Sync (Stub for simulation updates)
       const now = Date.now();
       if (ENV.DRY_RUN && (now - this.lastPnlSyncTime > this.PNL_SYNC_INTERVAL_MS)) {
            this.lastPnlSyncTime = now;
@@ -298,7 +251,7 @@ export class MarketLoop {
            }
       }
 
-      // 9. State Persistence
+      // 8. State Persistence
       const nowTs = new Date().toISOString();
       const stateRow: MarketStateRow = {
         market_id: this.market.id,
@@ -309,7 +262,7 @@ export class MarketLoop {
         delta: observation.delta,
         direction: observation.direction,
         confidence: observation.confidence,
-        exposure: this.currentExposure,
+        exposure: currentAccountExposure, // Report the ACCOUNT exposure, not loop local
         last_update: nowTs
       };
 
@@ -321,15 +274,13 @@ export class MarketLoop {
     }
   }
 
-  /**
-   * Executes a defensive exit: Halts scaling, sells inventory, stops loop.
-   * REACHABLE ONLY ONCE per market due to hasExitedDefensively flag.
-   */
   private async executeDefensiveExit(decision: any) {
       if (!this.scalingState.lockedDirection) return;
 
-      // Log Mandatory Trigger Event
-      Logger.info(`[DEFENSIVE_EXIT_TRIGGERED] marketId=${this.market.id} reason=${decision.reason} netExposure=${this.currentExposure} entryDirection=${this.scalingState.lockedDirection}`);
+      // Fetch Account for accurate logging
+      const acc = accountManager.getAccount(this.market.asset, this.scalingState.lockedDirection);
+
+      Logger.info(`[DEFENSIVE_EXIT_TRIGGERED] marketId=${this.market.id} reason=${decision.reason} netExposure=${acc.currentExposure} entryDirection=${this.scalingState.lockedDirection}`);
       
       const result = await executionService.defensiveExit(
           this.market,
@@ -338,32 +289,26 @@ export class MarketLoop {
       );
 
       if (result.executed) {
-          // LOCK TERMINAL STATE
           this.hasExitedDefensively = true;
-          this.currentExposure = 0; 
           this.stop(`DEFENSIVE_EXIT:${decision.reason}`);
       } else {
           Logger.error(`[DEFENSIVE_EXIT] Execution Failed. Retrying next tick.`);
-          // If execution failed (network error), we do NOT set terminal flag yet,
-          // allowing the next tick to retry the exit.
       }
   }
 
-  /**
-   * Evaluates whether to enter or add to a position based on Confidence Tiers.
-   */
-  private async evaluateScaling(obs: any, cooldown: number, baseSize: number) {
+  private async evaluateScaling(obs: any, cooldown: number) {
+      if (obs.direction === 'NEUTRAL') return;
+
       // A. Direction Lock Check
       if (this.scalingState.lockedDirection) {
           if (this.scalingState.lockedDirection !== obs.direction) {
-              // Signal mismatch - Do nothing (Wait for alignment or expiry)
               return;
           }
       }
 
       // B. Max Clips Check
       if (this.scalingState.clipsPlaced >= this.SCALING_PLAN.length) {
-          return; // Max allocation reached
+          return; 
       }
 
       // C. Cooldown Check
@@ -396,26 +341,23 @@ export class MarketLoop {
           }
 
           Logger.info(`[SCALING] Tier ${tierConfig.level} Eligible (Conf=${obs.confidence.toFixed(2)}). Mode: ${executionMode}`);
-
-          const tradeSize = baseSize * tierConfig.sizeMult;
           
+          // Execute with NO baseSize override here, let ExecutionService/RiskGovernor resolve size from Account
           const result = await executionService.attemptTrade(
               this.market, 
               obs, 
-              this.currentExposure,
               { 
                   tierLevel: tierConfig.level, 
                   clipIndex: nextTierIdx + 1,
                   scalingFactor: tierConfig.sizeMult,
-                  tradeSizeOverride: tradeSize,
+                  tradeSizeOverride: 0, // 0 signals "Use RiskGovernor Calc"
                   mode: executionMode,
-                  lockedDirection: this.scalingState.lockedDirection // Pass authoritative lock for invariant check
+                  lockedDirection: this.scalingState.lockedDirection
               }
           );
 
           if (result.executed || result.simulated) {
               // SUCCESS
-              this.currentExposure = result.newExposure;
               this.lastTradeTime = now;
               
               // Update Scaling State
@@ -424,7 +366,6 @@ export class MarketLoop {
               
               if (!this.scalingState.lockedDirection) {
                   this.scalingState.lockedDirection = obs.direction;
-                  // RECORD ENTRY METADATA for Defensive Checks
                   this.scalingState.entryRegime = obs.regime;
                   this.scalingState.entryConfidence = obs.confidence;
 
@@ -434,11 +375,6 @@ export class MarketLoop {
               Logger.info(`[SCALING] Executed Clip #${this.scalingState.clipsPlaced} (Tier ${tierConfig.level})`);
           } else if (executionMode === 'PASSIVE') {
              Logger.info(`[SCALING] Passive Attempt Missed/Skipped. Waiting for next tick.`);
-          }
-      } else {
-          // Optional: Debug Log for "Almost there"
-          if (obs.confidence >= tierConfig.minConf && Math.random() < 0.05) {
-              Logger.info(`[SCALING] Tier ${tierConfig.level} pending persistence (${validSamples.length}/${tierConfig.persistenceSamples})...`);
           }
       }
   }

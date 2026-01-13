@@ -3,6 +3,7 @@ import { Market } from '../types/tables';
 import { Logger } from '../utils/logger';
 import { supabase } from '../services/supabase';
 import { ENV } from '../config/env';
+import { IsolatedMarketAccount } from '../types/accounts';
 
 export interface TimeMetrics {
   timeRemainingMs: number;
@@ -16,29 +17,22 @@ export interface TimeMetrics {
  * 
  * Rules:
  * 1. Global Kill Switch check
- * 2. Per-Market Hard Cap
- * 3. Global Hard Cap (Sum of all markets)
- * 4. Time-Based Exposure Decay (New)
+ * 2. Per-Account Bankroll Check (Isolated)
+ * 3. Per-Account Max Exposure Check (Isolated)
+ * 4. Time-Based Exposure Decay
  */
 export class RiskGovernor {
-  // Step 6 Constants
-  public static readonly GLOBAL_MAX_EXPOSURE = 10000; // Hard limit $10,000
-  public static readonly MAX_PER_MARKET = 2000;       // Hard limit $2,000 per market
-  public static readonly MAX_RISK_PER_TRADE = 0.05;   // 5% of Bankroll
-  public static readonly VIRTUAL_BANKROLL = 5000;     // Assumed bankroll for sizing
   
   // Time Decay Constants (15-Minute Markets)
   private readonly MARKET_DURATION_MS = 15 * 60 * 1000; // 900s
   private readonly ENTRY_CUTOFF_MS = 3 * 60 * 1000;     // 180s (Hard Stop)
+  private readonly MAX_RISK_PER_TRADE = 0.05;           // 5% of Account Bankroll
 
   /**
    * PURE FUNCTION: Calculates decay metrics based on expiry time.
-   * decayFactor = Linear 1.0 -> 0.0 over 15 minutes.
    */
   public calculateTimeMetrics(expiryIso?: string): TimeMetrics {
       if (!expiryIso) {
-          // If no expiry is known, we assume full risk is allowed (early lifecycle)
-          // or block it. EdgeEngine handles hydration, so this is a fallback.
           return { timeRemainingMs: this.MARKET_DURATION_MS, decayFactor: 1.0, isCutoff: false };
       }
 
@@ -46,11 +40,8 @@ export class RiskGovernor {
       const expiry = new Date(expiryIso).getTime();
       const timeRemainingMs = Math.max(0, expiry - now);
 
-      // 1. Hard Cutoff Check
       const isCutoff = timeRemainingMs <= this.ENTRY_CUTOFF_MS;
 
-      // 2. Linear Decay Calculation
-      // Clamp between 0 and 1
       const rawRatio = timeRemainingMs / this.MARKET_DURATION_MS;
       const decayFactor = Math.max(0, Math.min(1, rawRatio));
 
@@ -59,7 +50,6 @@ export class RiskGovernor {
 
   /**
    * Helper to reduce trade size based on time remaining.
-   * Logic: effectiveSize = baseSize * decayFactor
    */
   public applySizeDecay(baseSize: number, expiryIso?: string): number {
       const { decayFactor } = this.calculateTimeMetrics(expiryIso);
@@ -67,12 +57,13 @@ export class RiskGovernor {
   }
 
   /**
-   * Checks if a trade is safe to execute.
-   * @param market The market config
-   * @param amountUSDC The size of the proposed bet
-   * @param currentExposure The current exposure in this market
+   * Checks if a trade is safe to execute within the context of an Isolated Market Account.
    */
-  public async requestApproval(market: Market, amountUSDC: number, currentExposure: number): Promise<boolean> {
+  public async requestApproval(
+      market: Market, 
+      account: IsolatedMarketAccount, // REQUIRED: Context
+      amountUSDC: number
+    ): Promise<boolean> {
     
     // 1. Check Global Kill Switch (Live DB Check)
     const { data: control, error } = await supabase.from('bot_control').select('desired_state').eq('id', 1).single();
@@ -82,23 +73,30 @@ export class RiskGovernor {
       return false;
     }
 
-    // 2. TIME-BASED RISK CONTROLS (Run in DRY_RUN too for simulation accuracy)
+    // 2. TIME-BASED RISK CONTROLS
     const { isCutoff, decayFactor, timeRemainingMs } = this.calculateTimeMetrics(market.t_expiry);
 
-    // A. Hard Time Cutoff
     if (isCutoff) {
-        Logger.warn(`[RISK] VETO: Entry Cutoff Active. Time Remaining: ${(timeRemainingMs/1000).toFixed(0)}s < 180s`);
+        Logger.warn(`[RISK] VETO: Entry Cutoff Active. Time Remaining: ${(timeRemainingMs/1000).toFixed(0)}s`);
         return false;
     }
 
-    // B. Decayed Max Exposure
-    // As time -> 0, Allowed Exposure -> 0.
-    // This forces the bot to stop adding risk and only hold or exit.
-    const dynamicMaxExposure = market.max_exposure * decayFactor;
+    // 3. ISOLATED ACCOUNT CHECKS
     
-    if (currentExposure + amountUSDC > dynamicMaxExposure) {
-        Logger.warn(`[RISK] VETO: Decayed Exposure Limit Hit.`, {
-            current: currentExposure,
+    // A. Bankroll Solvency
+    // Cannot bet more than current bankroll
+    if (amountUSDC > account.bankroll) {
+         Logger.warn(`[RISK] VETO: Insufficient Bankroll in ${account.marketKey}. Need $${amountUSDC}, Have $${account.bankroll}`);
+         return false;
+    }
+
+    // B. Decayed Max Exposure (Per Account)
+    const dynamicMaxExposure = account.maxExposure * decayFactor;
+    
+    // Check if adding this bet exceeds the dynamic max exposure for this SPECIFIC account
+    if (account.currentExposure + amountUSDC > dynamicMaxExposure) {
+        Logger.warn(`[RISK] VETO: Account Exposure Limit Hit for ${account.marketKey}`, {
+            current: account.currentExposure,
             add: amountUSDC,
             limit: dynamicMaxExposure.toFixed(2),
             decayFactor: decayFactor.toFixed(2)
@@ -106,82 +104,15 @@ export class RiskGovernor {
         return false;
     }
 
-    // 3. DRY RUN: Bypass Global Caps (But keep time logic above for realism)
-    if (ENV.DRY_RUN) {
-      return true;
-    }
-
-    // ---------------------------------------------------------
-    // LIVE MODE CHECKS BELOW
-    // ---------------------------------------------------------
-
-    // 4. Check Market Hard Cap
-    if (currentExposure + amountUSDC > RiskGovernor.MAX_PER_MARKET) {
-      Logger.warn(`[RISK] VETO: Hard Cap Reached ($${RiskGovernor.MAX_PER_MARKET}) for ${market.polymarket_market_id}.`);
-      return false;
-    }
-
-    // 5. Check Global Exposure (Strict Scoping)
-    const { data: enabledMarkets } = await supabase
-        .from('markets')
-        .select('id, polymarket_market_id, active_run_id')
-        .eq('enabled', true);
-        
-    if (!enabledMarkets) {
-        Logger.warn("[RISK] Could not fetch enabled markets. Defaulting to Reject.");
-        return false;
-    }
-
-    const marketIds = enabledMarkets.map(m => m.id);
-
-    const { data: activeStates, error: stateError } = await supabase
-        .from('market_state')
-        .select('market_id, exposure, run_id')
-        .in('market_id', marketIds);
-    
-    if (stateError || !activeStates) {
-      Logger.error("[RISK] FAILED to fetch global exposure. Defaulting to REJECT.", stateError);
-      return false;
-    }
-
-    let currentGlobalExposure = 0;
-    const debugContributors: any[] = [];
-
-    for (const state of activeStates) {
-        const marketConfig = enabledMarkets.find(m => m.id === state.market_id);
-        
-        // Strict Scope Check: The state row must belong to the currently active run for this market
-        if (marketConfig && marketConfig.active_run_id && state.run_id === marketConfig.active_run_id) {
-            const exp = state.exposure || 0;
-            currentGlobalExposure += exp;
-            
-            // Collect debug info for logs if we hit the cap
-            debugContributors.push({ 
-                slug: marketConfig.polymarket_market_id.substring(0, 15) + '...', 
-                run: state.run_id.split('-')[0], 
-                exp 
-            });
-        }
-    }
-    
-    // Check if adding the new bet would breach the Global Max
-    if (currentGlobalExposure + amountUSDC > RiskGovernor.GLOBAL_MAX_EXPOSURE) {
-      Logger.warn(`[RISK] GLOBAL_CAP_REACHED`, {
-         mode: 'LIVE',
-         currentExposure: currentGlobalExposure,
-         betSize: amountUSDC,
-         max: RiskGovernor.GLOBAL_MAX_EXPOSURE,
-         contributors: debugContributors
-      });
-      return false;
-    }
-    
     return true;
   }
 
-  public calculateBetSize(): number {
-    const fractionalSize = RiskGovernor.VIRTUAL_BANKROLL * RiskGovernor.MAX_RISK_PER_TRADE; 
-    const hardCap = 100;
+  /**
+   * Calculates safe bet size based on the specific account's bankroll.
+   */
+  public calculateBetSize(account: IsolatedMarketAccount): number {
+    const fractionalSize = account.bankroll * this.MAX_RISK_PER_TRADE; 
+    const hardCap = 100; // Absolute max per clip regardless of bankroll size
     return Math.min(fractionalSize, hardCap);
   }
 }
