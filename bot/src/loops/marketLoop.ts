@@ -9,14 +9,15 @@ import { supabase } from '../services/supabase';
 import { polymarket } from '../services/polymarket';
 import { pnlLedger } from '../services/pnlLedger';
 import { defensiveExitEvaluator } from '../services/defensiveExit';
-import { accountManager } from '../services/accountManager'; // Import Account Manager
+import { accountManager } from '../services/accountManager'; 
+import { IsolatedMarketAccount } from '../types/accounts';
 
 interface TierConfig {
     level: number;
     minConf: number;
-    persistenceSamples: number; // How many recent ticks must meet minConf
-    windowSize: number;         // Lookback window size
-    sizeMult: number;           // Multiplier of Base Bet Size
+    persistenceSamples: number; 
+    windowSize: number;         
+    sizeMult: number;           
 }
 
 interface ScalingState {
@@ -35,7 +36,10 @@ export class MarketLoop {
   private edgeEngine: EdgeEngine;
   private lastRunId: string | undefined = undefined;
   
-  // INVARIANT 1: TERMINAL STATE FLAG
+  // INVARIANT 1: IMMUTABLE ACCOUNT MAPPING
+  // Once locked, this reference MUST be used for all ledger/risk operations.
+  private _immutableAccount: IsolatedMarketAccount | null = null;
+  
   private hasExitedDefensively: boolean = false;
 
   private lastWriteTime: number = 0;
@@ -71,7 +75,6 @@ export class MarketLoop {
   public async start() {
     if (this.active) return;
     
-    // No longer needing refreshExposure() from DB, we trust AccountManager
     await this.hydrateScalingState();
     
     this.active = true;
@@ -98,15 +101,19 @@ export class MarketLoop {
       if (trades && trades.length > 0) {
           const firstTrade = trades[0];
           this.scalingState.lockedDirection = firstTrade.side as 'UP' | 'DOWN';
+          
+          // RE-ESTABLISH INVARIANT ON HYDRATION
+          this._immutableAccount = accountManager.getAccount(this.market.asset, this.scalingState.lockedDirection);
+          Logger.info(`[INVARIANT_RESTORE] Locked Account: ${this._immutableAccount.marketKey}`);
+
           if (firstTrade.signals) {
               this.scalingState.entryRegime = firstTrade.signals.regime;
           }
           this.scalingState.clipsPlaced = trades.length;
           this.scalingState.lastTierLevel = trades.length;
-          
-          Logger.info(`[HYDRATE] Restored State for ${this.market.asset}: Locked=${this.scalingState.lockedDirection}, Clips=${this.scalingState.clipsPlaced}`);
       } else {
           this.scalingState.lockedDirection = null;
+          this._immutableAccount = null;
           this.scalingState.clipsPlaced = 0;
           this.scalingState.lastTierLevel = 0;
           this.scalingState.entryRegime = undefined;
@@ -123,9 +130,9 @@ export class MarketLoop {
     }
     
     if (this.hasExitedDefensively) {
-        Logger.info(`[MARKET_LOOP_STOP] reason=DEFENSIVE_EXIT marketId=${this.market.id}`);
+        Logger.info(`[MARKET_TERMINATED] reason=DEFENSIVE_EXIT marketId=${this.market.id}`);
     } else {
-        Logger.info(`[MARKET_LOOP_STOP] marketId=${this.market.id} reason=${reason} finalTickTime=${new Date(this.lastWriteTime).toISOString()}`);
+        Logger.info(`[MARKET_TERMINATED] marketId=${this.market.id} reason=${reason}`);
     }
   }
 
@@ -136,19 +143,18 @@ export class MarketLoop {
   private async tick() {
     if (!this.active) return;
 
-    // INVARIANT 1: HARD TERMINAL GUARD
     if (this.hasExitedDefensively) {
-        Logger.warn(`[INVARIANT_GUARD] Tick attempted after Defensive Exit. Ignoring.`);
         return;
     }
 
     const run = this.market._run;
     if (!run || run.status !== 'RUNNING') return; 
 
-    // 1. Lifecycle Reset
+    // Lifecycle Reset
     if (this.lastRunId !== run.id) {
         Logger.info(`[LOOP] New Run Detected: ${run.id}. Resetting Local State.`);
         this.scalingState = { lockedDirection: null, clipsPlaced: 0, lastTierLevel: 0, history: [] };
+        this._immutableAccount = null; // Clear Invariant
         this.priceHistory = [];
         this.lastRunId = run.id;
         this.lastTradeTime = 0;
@@ -156,16 +162,13 @@ export class MarketLoop {
     }
 
     try {
-      // 2. Observe
-      // Note: We don't have a "baseTradeSize" globally anymore, sizing is per-Account.
-      // But EdgeEngine needs a dummy size for VWAP calc.
       const observation = await this.edgeEngine.observe(
           this.market, 
           this.priceHistory,
-          10 // Dummy size for VWAP calc, real sizing happens later
+          10 
       );
 
-      // 3. Check Expiration
+      // Expiration Check
       if (this.market.t_expiry) {
           const expiryTime = new Date(this.market.t_expiry).getTime();
           if (Date.now() >= expiryTime) {
@@ -201,24 +204,40 @@ export class MarketLoop {
       let status: 'WATCHING' | 'OPPORTUNITY' | 'LOCKED' = 'WATCHING';
       if (!observation.isSafeToTrade) status = 'LOCKED';
 
-      // 4. RESOLVE ISOLATED ACCOUNT
-      // Logic: If locked, use locked direction. If not, use observed direction to check feasibility.
-      const directionKey = this.scalingState.lockedDirection || observation.direction;
-      
-      // Determine if we have capital/exposure for this specific bucket
-      // This is purely for reporting status in this tick, execution checks again strictly.
+      // ---------------------------------------------------------
+      // INVARIANT #1: ACCOUNT RESOLUTION
+      // ---------------------------------------------------------
+      let activeAccount: IsolatedMarketAccount | null = null;
       let currentAccountExposure = 0;
-      try {
-          if (directionKey !== 'NEUTRAL') {
-            const acc = accountManager.getAccount(this.market.asset, directionKey);
-            currentAccountExposure = acc.currentExposure;
+
+      if (this.scalingState.lockedDirection) {
+          // STRICT PATH: Use Immutable Account
+          if (!this._immutableAccount) {
+              throw new Error("[INVARIANT_VIOLATION] Direction is locked but _immutableAccount is null.");
           }
-      } catch (e) {
-          // Can happen if direction is NEUTRAL or asset unknown
+          
+          if (this._immutableAccount.direction !== this.scalingState.lockedDirection) {
+               throw new Error(`[INVARIANT_VIOLATION] Locked Direction ${this.scalingState.lockedDirection} mismatch with Account ${this._immutableAccount.direction}`);
+          }
+
+          activeAccount = this._immutableAccount;
+          currentAccountExposure = activeAccount.currentExposure;
+      } else {
+          // WATCH PATH: Use Observation Direction
+          // No lock yet, so we peek at the potential account.
+          if (observation.direction !== 'NEUTRAL') {
+               activeAccount = accountManager.getAccount(this.market.asset, observation.direction);
+               currentAccountExposure = activeAccount.currentExposure;
+          }
       }
 
       // 5. DEFENSIVE EXIT EVALUATION
-      if (this.scalingState.lockedDirection && currentAccountExposure > 0) {
+      if (this.scalingState.lockedDirection && activeAccount) {
+          // Verify we passed the correct account
+          if (activeAccount !== this._immutableAccount) {
+              throw new Error("[INVARIANT_VIOLATION] Active Account !== Immutable Account during Defensive Check");
+          }
+
           const exitDecision = defensiveExitEvaluator.shouldExit(
               observation,
               this.scalingState.history,
@@ -238,7 +257,7 @@ export class MarketLoop {
           if (this.scalingState.clipsPlaced > 0) status = 'OPPORTUNITY';
       }
 
-      // 7. PnL Sync (Stub for simulation updates)
+      // 7. PnL Sync 
       const now = Date.now();
       if (ENV.DRY_RUN && (now - this.lastPnlSyncTime > this.PNL_SYNC_INTERVAL_MS)) {
            this.lastPnlSyncTime = now;
@@ -262,7 +281,7 @@ export class MarketLoop {
         delta: observation.delta,
         direction: observation.direction,
         confidence: observation.confidence,
-        exposure: currentAccountExposure, // Report the ACCOUNT exposure, not loop local
+        exposure: currentAccountExposure, 
         last_update: nowTs
       };
 
@@ -275,12 +294,12 @@ export class MarketLoop {
   }
 
   private async executeDefensiveExit(decision: any) {
-      if (!this.scalingState.lockedDirection) return;
+      if (!this.scalingState.lockedDirection || !this._immutableAccount) {
+          Logger.error("[INVARIANT_VIOLATION] Defensive Exit triggered without Locked State");
+          return;
+      }
 
-      // Fetch Account for accurate logging
-      const acc = accountManager.getAccount(this.market.asset, this.scalingState.lockedDirection);
-
-      Logger.info(`[DEFENSIVE_EXIT_TRIGGERED] marketId=${this.market.id} reason=${decision.reason} netExposure=${acc.currentExposure} entryDirection=${this.scalingState.lockedDirection}`);
+      Logger.info(`[DEFENSIVE_EXIT_TRIGGERED] marketId=${this.market.id} reason=${decision.reason} entryDirection=${this.scalingState.lockedDirection}`);
       
       const result = await executionService.defensiveExit(
           this.market,
@@ -342,7 +361,6 @@ export class MarketLoop {
 
           Logger.info(`[SCALING] Tier ${tierConfig.level} Eligible (Conf=${obs.confidence.toFixed(2)}). Mode: ${executionMode}`);
           
-          // Execute with NO baseSize override here, let ExecutionService/RiskGovernor resolve size from Account
           const result = await executionService.attemptTrade(
               this.market, 
               obs, 
@@ -350,7 +368,7 @@ export class MarketLoop {
                   tierLevel: tierConfig.level, 
                   clipIndex: nextTierIdx + 1,
                   scalingFactor: tierConfig.sizeMult,
-                  tradeSizeOverride: 0, // 0 signals "Use RiskGovernor Calc"
+                  tradeSizeOverride: 0, 
                   mode: executionMode,
                   lockedDirection: this.scalingState.lockedDirection
               }
@@ -364,12 +382,16 @@ export class MarketLoop {
               this.scalingState.clipsPlaced++;
               this.scalingState.lastTierLevel = tierConfig.level;
               
+              // INVARIANT 1: LOCK DIRECTION ON FIRST TRADE
               if (!this.scalingState.lockedDirection) {
                   this.scalingState.lockedDirection = obs.direction;
+                  this._immutableAccount = accountManager.getAccount(this.market.asset, obs.direction);
+                  
                   this.scalingState.entryRegime = obs.regime;
                   this.scalingState.entryConfidence = obs.confidence;
 
-                  Logger.info(`[SCALING] DIRECTION LOCKED: ${obs.direction} (Regime: ${obs.regime})`);
+                  Logger.info(`[DIRECTION_LOCKED] Market: ${this.market.polymarket_market_id} -> ${obs.direction}`);
+                  Logger.info(`[ACCOUNT_LOCKED] ${this._immutableAccount.marketKey}`);
               }
               
               Logger.info(`[SCALING] Executed Clip #${this.scalingState.clipsPlaced} (Tier ${tierConfig.level})`);

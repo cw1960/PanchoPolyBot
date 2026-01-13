@@ -2,7 +2,7 @@
 import { supabase } from './supabase';
 import { Logger } from '../utils/logger';
 import { TradeLedgerRow } from '../types/tables';
-import { accountManager } from './accountManager'; // NEW IMPORT
+import { accountManager } from './accountManager'; 
 
 export class PnLLedgerService {
     
@@ -59,7 +59,6 @@ export class PnLLedgerService {
 
     /**
      * Helper to get total open shares for a run/market.
-     * Used by Defensive Exit to determine how much to sell.
      */
     public async getNetPosition(runId: string, marketId: string): Promise<{ shares: number, avgEntry: number }> {
         const { data: trades } = await supabase
@@ -88,27 +87,42 @@ export class PnLLedgerService {
 
     /**
      * Closes all OPEN positions for a market (Defensive Exit).
-     * Assumes immediate exit at current market mid or bid.
+     * INVARIANT #2: Single-Shot Capital Release via Atomic DB Update
      */
     public async closePosition(runId: string, marketId: string, reason: string, details: any) {
          
-         // Fetch open trades
-         // We need to fetch 'metadata' to know which account it belongs to if we stored it there.
-         // Or infer from 'market_id' -> 'market' -> 'asset'.
-         // Ideally, we fetch market details too, but we can do a second lookup.
-         
-         const { data: trades } = await supabase
-            .from('trade_ledger')
-            .select('*, markets(asset)')
-            .eq('run_id', runId)
-            .eq('market_id', marketId)
-            .eq('status', 'OPEN');
-
-         if (!trades || trades.length === 0) return;
-
          const exitTimestamp = new Date().toISOString();
 
-         for (const trade of trades) {
+         // 1. ATOMIC UPDATE: Fetch only the rows we successfully transition from OPEN -> CLOSED.
+         // This guarantees that if this function runs twice, the second run finds 0 rows.
+         const { data: closedTrades, error } = await supabase
+            .from('trade_ledger')
+            .update({
+                status: 'CLOSED',
+                closed_at: exitTimestamp,
+                metadata: {
+                    exit_reason: reason,
+                    exit_details: details
+                }
+            })
+            .eq('run_id', runId)
+            .eq('market_id', marketId)
+            .eq('status', 'OPEN') // Critical Gatekeeper
+            .select();
+
+         if (error) {
+             Logger.error("[PNL_CLOSE] Atomic update failed", error);
+             return;
+         }
+
+         if (!closedTrades || closedTrades.length === 0) {
+             Logger.info(`[PNL_CLOSE] No OPEN trades found to close for ${marketId} (Idempotent Check Passed)`);
+             return;
+         }
+
+         Logger.info(`[PNL_CLOSE] Atomically closed ${closedTrades.length} trades.`);
+
+         for (const trade of closedTrades) {
              let exitPrice = trade.metadata?.last_mark_price || trade.entry_price; 
              exitPrice = exitPrice * 0.99; // Slippage penalty
 
@@ -116,56 +130,62 @@ export class PnLLedgerService {
              const finalValue = shares * exitPrice;
              const realizedPnl = finalValue - trade.size_usd;
 
-             await supabase
-                .from('trade_ledger')
-                .update({
-                    status: 'CLOSED',
-                    exit_price: exitPrice,
-                    realized_pnl: realizedPnl,
-                    unrealized_pnl: 0,
-                    closed_at: exitTimestamp,
-                    metadata: {
-                        ...(trade.metadata || {}),
-                        exit_reason: reason,
-                        exit_details: details
-                    }
-                })
-                .eq('id', trade.id);
+             // Update calculated PnL values on the now-closed rows
+             await supabase.from('trade_ledger').update({
+                 exit_price: exitPrice,
+                 realized_pnl: realizedPnl,
+                 unrealized_pnl: 0,
+             }).eq('id', trade.id);
             
             // CRITICAL: UPDATE ISOLATED ACCOUNT PnL
-            // We need asset and direction.
-            // Asset comes from join (markets(asset)) if supabase supports it, or we rely on metadata
-            const asset = (trade as any).markets?.asset || trade.metadata?.asset || 'BTC'; // Fallback needs to be robust
-            
-            // Direction: If side is YES, direction is UP. If NO, direction is DOWN.
-            // Assumption: This mapping holds for standard markets.
+            const asset = (trade as any).markets?.asset || trade.metadata?.asset || 'BTC'; 
             const direction = trade.side === 'YES' ? 'UP' : 'DOWN';
             
+            Logger.info(`[CAPITAL_RELEASED] ${asset}_${direction} | Released Exposure: $${trade.size_usd} | PnL: $${realizedPnl.toFixed(2)}`);
+
             // 1. Update PnL & Bankroll
             accountManager.updatePnL(asset, direction, realizedPnl);
             
             // 2. Reduce Exposure (Free up the cost basis)
-            // When we close, we remove the Cost Basis from Current Exposure.
             accountManager.updateExposure(asset, direction, -trade.size_usd);
          }
     }
 
     /**
      * Settles all OPEN trades upon expiration.
+     * INVARIANT #2: Single-Shot Capital Release via Atomic DB Update
      */
     public async settleMarket(marketId: string, runId: string, finalPriceYes: number, source: string = 'UNKNOWN') {
-        const { data: trades, error } = await supabase
+        
+        const { data: closedTrades, error } = await supabase
             .from('trade_ledger')
-            .select('*, markets(asset)')
+            .update({
+                status: 'CLOSED',
+                closed_at: new Date().toISOString(),
+                metadata: {
+                    settlement_reason: 'EXPIRY',
+                    settlement_source: source,
+                    final_mark_price: finalPriceYes
+                }
+            })
             .eq('run_id', runId)
             .eq('market_id', marketId)
-            .eq('status', 'OPEN');
+            .eq('status', 'OPEN') // Critical Gatekeeper
+            .select('*, markets(asset)'); // We need asset info
 
-        if (error || !trades || trades.length === 0) return;
+        if (error) {
+             Logger.error("[PNL_SETTLE] Atomic update failed", error);
+             return;
+        }
 
-        Logger.info(`[PNL_SETTLE] Closing ${trades.length} trades. Market=${marketId} Price=${finalPriceYes.toFixed(3)} Source=${source}`);
+        if (!closedTrades || closedTrades.length === 0) {
+            Logger.info(`[PNL_SETTLE] No OPEN trades found for ${marketId} (Idempotent Check Passed)`);
+            return;
+        }
 
-        for (const trade of trades) {
+        Logger.info(`[PNL_SETTLE] Closing ${closedTrades.length} trades. Market=${marketId} Price=${finalPriceYes.toFixed(3)} Source=${source}`);
+
+        for (const trade of closedTrades) {
             let exitPrice = finalPriceYes;
             if (trade.side === 'NO') {
                 exitPrice = 1 - finalPriceYes;
@@ -175,27 +195,23 @@ export class PnLLedgerService {
             const finalValue = shares * exitPrice;
             const realizedPnl = finalValue - trade.size_usd;
 
+            // Finalize PnL
             await supabase
                 .from('trade_ledger')
                 .update({
-                    status: 'CLOSED',
                     exit_price: exitPrice,
                     realized_pnl: realizedPnl,
                     unrealized_pnl: 0,
-                    closed_at: new Date().toISOString(),
-                    metadata: {
-                        ...(trade.metadata || {}),
-                        settlement_reason: 'EXPIRY',
-                        settlement_source: source,
-                        final_mark_price: finalPriceYes
-                    }
                 })
-                .eq('id', trade.id)
-                .eq('status', 'OPEN'); 
+                .eq('id', trade.id);
             
             // CRITICAL: UPDATE ISOLATED ACCOUNT PnL
-            const asset = (trade as any).markets?.asset || 'BTC'; 
+            // Note: .select('*, markets(asset)') might return object structure. 
+            // Supabase returns joined data as properties.
+            const asset = (trade as any).markets?.asset || trade.metadata?.asset || 'BTC'; 
             const direction = trade.side === 'YES' ? 'UP' : 'DOWN';
+
+            Logger.info(`[CAPITAL_RELEASED] ${asset}_${direction} | Released Exposure: $${trade.size_usd} | PnL: $${realizedPnl.toFixed(2)}`);
 
             accountManager.updatePnL(asset, direction, realizedPnl);
             accountManager.updateExposure(asset, direction, -trade.size_usd);

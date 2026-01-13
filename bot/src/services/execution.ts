@@ -8,7 +8,7 @@ import { ENV } from '../config/env';
 import { feeModel } from './feeModel';
 import { TradeLogger } from './tradeLogger';
 import { pnlLedger } from './pnlLedger';
-import { accountManager } from './accountManager'; // NEW IMPORT
+import { accountManager } from './accountManager'; 
 
 export type ExecutionMode = 'AGGRESSIVE' | 'PASSIVE';
 
@@ -24,11 +24,10 @@ export interface ScalingMetadata {
 export class ExecutionService {
   
   private static readonly MAX_ENTRY_PRICE_DEFAULT = 0.95;
-  private static readonly MIN_ORDER_SIZE_USD = 1.00; // Minimum viable bet size
+  private static readonly MIN_ORDER_SIZE_USD = 1.00; 
 
   /**
    * Executes a Defensive Exit (Panic Close) for the entire position.
-   * This is an AGGRESSIVE Taker order to exit immediately.
    */
   public async defensiveExit(
       market: Market, 
@@ -42,11 +41,9 @@ export class ExecutionService {
 
       if (!runId) return { executed: false };
 
-      // 1. Determine Position Size (Shares)
-      // Since we don't have a live portfolio sync, we sum up open trades from PnL Ledger.
+      // 1. Determine Position Size
       const position = await pnlLedger.getNetPosition(runId, market.id);
       
-      // INVARIANT 2: NO ZERO EXPOSURE EXIT
       if (position.shares <= 0) {
           throw new Error(`[INVARIANT_VIOLATION] Defensive exit attempted with zero/negative exposure: ${position.shares}`);
       }
@@ -63,7 +60,7 @@ export class ExecutionService {
       const sideToSell = lockedDirection === 'UP' ? 'UP' : 'DOWN';
       const tokenId = sideToSell === 'UP' ? tokens.up : tokens.down;
 
-      // 3. Execution (Market Sell / Limit at Bid)
+      // 3. Execution
       try {
           if (ENV.DRY_RUN) {
               await new Promise(r => setTimeout(r, 200));
@@ -77,7 +74,7 @@ export class ExecutionService {
                   polymarket_market_id: market.polymarket_market_id,
                   asset: market.asset,
                   side: lockedDirection,
-                  stake_usd: 0, // Exit doesn't stake new money
+                  stake_usd: 0, 
                   entry_prob: 0,
                   confidence: reasonDetails.confidence,
                   status: 'EXECUTED',
@@ -91,25 +88,12 @@ export class ExecutionService {
                   }
               });
 
-              // NOTE: Defensive exit reduces exposure. PnLLedger closePosition triggers updatePnL on AccountManager, 
-              // but we should arguably update Exposure on AccountManager immediately or let PnL handler do it.
-              // PnLLedger handles PnL updates. We should handle Exposure decrement here or rely on PnL?
-              // Standard: When we close, exposure becomes 0.
-              // We'll let PnL Ledger handling drive the account update logic via its 'settle' calls?
-              // Actually, AccountManager.updatePnL handles bankroll, but we need to decrease currentExposure manually here
-              // because currentExposure is "Cost Basis of Open Positions".
-              // Close = remove cost basis.
-              
-              // However, since PnL Ledger processes the close, it knows the cost basis removed.
-              // We will rely on PnL Ledger to callback Account Manager updates.
-              
               return { executed: true };
           } 
 
           // LIVE EXECUTION
-          // Get Market Bid Price for limit (aggressive marketable limit)
           const depth = await polymarket.getMarketDepth(tokenId);
-          const sellPrice = depth?.bestBid || 0.01; // Sell into bid
+          const sellPrice = depth?.bestBid || 0.01; 
 
           if (sellPrice <= 0.01) {
               Logger.warn(`[${contextId}] Bid price too low (${sellPrice}). Cannot exit safely.`);
@@ -156,17 +140,37 @@ export class ExecutionService {
     const contextId = `EXEC-${Date.now()}`;
     const mode = ENV.DRY_RUN ? 'DRY_RUN' : 'LIVE';
     
-    // 1. ISOLATED ACCOUNT RESOLUTION
-    const direction = scalingMeta?.lockedDirection || obs.direction;
+    // ---------------------------------------------------------
+    // INVARIANT 1: IMMUTABLE DIRECTION/ACCOUNT CHECK
+    // ---------------------------------------------------------
+    let direction: 'UP' | 'DOWN' | 'NEUTRAL' = obs.direction;
+    
+    if (scalingMeta?.lockedDirection) {
+        direction = scalingMeta.lockedDirection;
+        // Ensure Signal isn't trying to trade against the lock (Logic Check)
+        // If obs.direction is NEUTRAL or Opposite, we proceed ONLY if logic allows (which it shouldn't for 'Entry')
+        // But the Direction passed to AccountManager MUST be the Locked Direction.
+    }
+    
     if (direction === 'NEUTRAL') return { executed: false, newExposure: 0 };
 
+    // RESOLVE ACCOUNT
     const account = accountManager.getAccount(market.asset, direction);
+    Logger.info(`[ACCOUNT_RESOLVED] ${account.marketKey} for Market ${market.polymarket_market_id}`);
+
+    // HARD ASSERT: If locked, account must match lock
+    if (scalingMeta?.lockedDirection) {
+        if (account.direction !== scalingMeta.lockedDirection) {
+            throw new Error(`[INVARIANT_VIOLATION] Account Resolved (${account.direction}) != Locked Direction (${scalingMeta.lockedDirection})`);
+        }
+    }
+    // ---------------------------------------------------------
 
     const run = market._run;
     const expParams = run?.params || {};
     const executionMode: ExecutionMode = scalingMeta?.mode || 'AGGRESSIVE';
 
-    // 0. PASSIVE DIRECTION SAFETY
+    // PASSIVE DIRECTION SAFETY
     if (executionMode === 'PASSIVE') {
         const lockedDir = scalingMeta?.lockedDirection;
         if (lockedDir && lockedDir !== obs.direction) {
@@ -183,12 +187,10 @@ export class ExecutionService {
     } else if (expParams.tradeSize && expParams.tradeSize > 0) {
         rawBetSize = expParams.tradeSize;
     } else {
-        // USE ISOLATED ACCOUNT FOR SIZING
         rawBetSize = riskGovernor.calculateBetSize(account);
     }
 
     // SIZE LOGIC (DECAYED)
-    // effectiveSize = baseSize * confidence * decayFactor
     const confidenceMultiplier = Math.max(0.5, obs.confidence); 
     const preDecaySize = rawBetSize * confidenceMultiplier;
     const betSizeUSDC = riskGovernor.applySizeDecay(preDecaySize, market.t_expiry);
@@ -338,7 +340,6 @@ export class ExecutionService {
                       executionMode,
                       isMaker,
                       spreadAtPlacement,
-                      // Log the account used for audit
                       isolatedAccount: account.marketKey
                   }
               });
