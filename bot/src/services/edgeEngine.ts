@@ -156,8 +156,9 @@ export class EdgeEngine {
     const now = Date.now();
     
     // 2. Fetch Live Data
+    // PASSING MARKET ID FOR DIAGNOSTIC LOGGING
     const [clData, spotPrice] = await Promise.all([
-      this.chainlink.getLatestPrice(asset),
+      this.chainlink.getLatestPrice(asset, market.polymarket_market_id),
       this.spot.getSpotPrice(asset)
     ]);
 

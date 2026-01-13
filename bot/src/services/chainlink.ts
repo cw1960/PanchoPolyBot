@@ -1,3 +1,4 @@
+
 import axios from 'axios';
 import { Logger } from '../utils/logger';
 
@@ -14,9 +15,13 @@ const BASE_URL = 'https://data.chain.link/api/v1/feeds';
 
 export class ChainlinkService {
   
-  public async getLatestPrice(asset: string): Promise<{ price: number; timestamp: number } | null> {
+  public async getLatestPrice(asset: string, marketSlug: string = 'UNKNOWN'): Promise<{ price: number; timestamp: number } | null> {
     const address = FEED_ADDRESSES[asset.toUpperCase()];
     
+    // DIAGNOSTIC LOG START
+    console.log(`[ORACLE_CALL] slug=${marketSlug} asset=${asset} feed=${address}`);
+    // DIAGNOSTIC LOG END
+
     if (!address) {
       Logger.warn(`No Chainlink Feed Address configured for ${asset}`);
       return null;
