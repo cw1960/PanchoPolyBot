@@ -2,12 +2,13 @@
 import axios from 'axios';
 import { Logger } from '../utils/logger';
 
-// Mapping Assets to their Chainlink Aggregator Addresses (Polygon)
-// These IDs are used to query the Chainlink Data Feeds API.
-// 0xc907... is the official BTC/USD Aggregator on Polygon Mainnet
-const FEED_ADDRESSES: Record<string, string> = {
+// STRICT MAPPING - NO DEFAULTS
+// Polygon Mainnet Aggregator Addresses
+const CHAINLINK_FEEDS: Record<string, string> = {
   'BTC': '0xc907E116054Ad103354f2D350FD2514433D57F6f', 
-  'ETH': '0xF9680D99D6C9589e2a93a78A04A279771948a025', 
+  'ETH': '0xF9680D99D6C9589e2a93a78A04A279771948a025',
+  'SOL': '0x1092a6C1704e578494c259837905D4157a667618',
+  'XRP': '0x1C13E171969B0A3F1F17d3550889e4726279930D' // XRP/USD Aggregator
 };
 
 // Public read-only API for Chainlink Feeds (mirrors on-chain data)
@@ -15,16 +16,20 @@ const BASE_URL = 'https://data.chain.link/api/v1/feeds';
 
 export class ChainlinkService {
   
-  public async getLatestPrice(asset: string, marketSlug: string = 'UNKNOWN'): Promise<{ price: number; timestamp: number } | null> {
-    const address = FEED_ADDRESSES[asset.toUpperCase()];
-    
-    // DIAGNOSTIC LOG START
-    console.log(`[ORACLE_CALL] slug=${marketSlug} asset=${asset} feed=${address}`);
-    // DIAGNOSTIC LOG END
+  /**
+   * Fetches the latest price from the Chainlink feed.
+   * REQUIRES explicit asset and slug.
+   * THROWS if no feed is configured for the asset.
+   */
+  public async getLatestPrice(asset: string, marketSlug: string): Promise<{ price: number; timestamp: number } | null> {
+    const address = CHAINLINK_FEEDS[asset]; // Direct lookup, no fallbacks
+
+    // DIAGNOSTIC LOG (REQUIRED)
+    console.log(`[ORACLE_CALL] slug=${marketSlug} asset=${asset} feed=${address || 'UNDEFINED'}`);
 
     if (!address) {
-      Logger.warn(`No Chainlink Feed Address configured for ${asset}`);
-      return null;
+      Logger.error(`[CHAINLINK] FATAL: No feed configured for asset '${asset}'. Slug: ${marketSlug}`);
+      throw new Error(`[CHAINLINK] Configuration Error: No feed for ${asset}`);
     }
 
     try {
@@ -40,7 +45,7 @@ export class ChainlinkService {
 
       // 1. Parse Price (Chainlink uses 8 decimals for USD pairs usually)
       const rawPrice = BigInt(response.data.answer);
-      const decimals = 8; // Standard for BTC/USD and ETH/USD
+      const decimals = 8; 
       const price = Number(rawPrice) / Math.pow(10, decimals);
 
       // 2. Parse Timestamp (API returns seconds, we need ms)

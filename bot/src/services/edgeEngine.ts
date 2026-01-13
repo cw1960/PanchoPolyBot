@@ -6,6 +6,7 @@ import { MarketObservation } from '../types/marketEdge';
 import { Logger } from '../utils/logger';
 import { polymarket } from './polymarket';
 import { supabase } from './supabase';
+import { assetFromMarketSlug } from '../utils/assetDerivation';
 
 export class EdgeEngine {
   private chainlink: ChainlinkService;
@@ -108,7 +109,11 @@ export class EdgeEngine {
             }
             
             // Get trade at or immediately after t_open
-            const trade = await this.spot.getHistoricalTrade(market.asset, startMs);
+            // STRICT ASSET DERIVATION for fallback fetch
+            let derivedAsset = 'BTC'; // Minimal default for safety in hydration ONLY, edge case
+            try { derivedAsset = assetFromMarketSlug(market.polymarket_market_id); } catch(e) {}
+
+            const trade = await this.spot.getHistoricalTrade(derivedAsset, startMs);
             
             if (trade) {
                 // Precision Check: Must be within 2000ms of t_open
@@ -152,11 +157,23 @@ export class EdgeEngine {
     const isReady = await this.hydrateMarket(market);
     if (!isReady || !market.baseline_price || !market.t_expiry) return null;
 
-    const asset = market.asset || 'BTC'; 
+    // --- CRITICAL FIX: STRICT ASSET DERIVATION ---
+    let asset: string;
+    try {
+        asset = assetFromMarketSlug(market.polymarket_market_id);
+    } catch (e: any) {
+        Logger.error(`[EDGE] Asset Derivation Failed for ${market.polymarket_market_id}`, e.message);
+        return null; // Fail fast, do not proceed with bad asset
+    }
+    
+    // Update local object to ensure consistency downstream
+    market.asset = asset; 
+    // ---------------------------------------------
+
     const now = Date.now();
     
     // 2. Fetch Live Data
-    // PASSING MARKET ID FOR DIAGNOSTIC LOGGING
+    // PASSING DERIVED ASSET + SLUG
     const [clData, spotPrice] = await Promise.all([
       this.chainlink.getLatestPrice(asset, market.polymarket_market_id),
       this.spot.getSpotPrice(asset)
