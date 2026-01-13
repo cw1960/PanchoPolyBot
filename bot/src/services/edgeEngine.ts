@@ -180,8 +180,6 @@ export class EdgeEngine {
     const now = Date.now();
     
     // 2. Fetch Live Data
-    // PASSING DERIVED ASSET + SLUG
-    // Note: getLatestPrice will now throw if the asset is invalid or unmapped
     let clData, spotPrice;
     
     try {
@@ -190,8 +188,22 @@ export class EdgeEngine {
         this.spot.getSpotPrice(asset)
       ]);
     } catch (err: any) {
-      Logger.error(`[EDGE] Oracle Fetch Failed: ${err.message}`);
-      return null;
+      if (err.message && err.message.includes("[DRY_RUN] Chainlink access forbidden")) {
+          // --- DRY RUN BYPASS ---
+          Logger.info(`[DRY_RUN] Skipping price fetch for ${asset} - Using Deterministic Mocks`);
+          
+          let mockPrice = 45000; // Default BTC
+          if (asset === Asset.ETH) mockPrice = 2500;
+          if (asset === Asset.SOL) mockPrice = 95;
+          if (asset === Asset.XRP) mockPrice = 0.55;
+
+          clData = { price: mockPrice, timestamp: now, source: 'DRY_RUN_MOCK' };
+          spotPrice = mockPrice;
+          // ---------------------
+      } else {
+          Logger.error(`[EDGE] Oracle Fetch Failed: ${err.message}`);
+          return null;
+      }
     }
 
     if (!clData || !spotPrice) return null;

@@ -18,8 +18,6 @@ const BASE_URL = 'https://data.chain.link/api/v1/feeds';
 
 export class ChainlinkService {
   
-  private static loggedMockWarning = new Set<string>();
-
   /**
    * Fetches the latest price from the Chainlink feed.
    * REQUIRES explicit Asset enum and slug.
@@ -27,28 +25,12 @@ export class ChainlinkService {
    */
   public async getLatestPrice(asset: Asset, marketSlug: string): Promise<{ price: number; timestamp: number } | null> {
     
-    // --- DRY RUN BYPASS ---
-    // Prevent blocking tests with live oracle calls that may revert or timeout
-    if (ENV.DRY_RUN) {
-        if (!ChainlinkService.loggedMockWarning.has(asset)) {
-            Logger.info(`[DRY_RUN] Using mock Chainlink price for ${asset} (Bypassing Oracle)`);
-            ChainlinkService.loggedMockWarning.add(asset);
-        }
-
-        let mockPrice = 1.0;
-        switch(asset) {
-            case Asset.BTC: mockPrice = 95000; break;
-            case Asset.ETH: mockPrice = 2800; break;
-            case Asset.SOL: mockPrice = 150; break;
-            case Asset.XRP: mockPrice = 2.50; break;
-        }
-
-        return { 
-            price: mockPrice, 
-            timestamp: Date.now() 
-        };
+    // --- DRY RUN HARD GATE ---
+    // Strictly forbids any execution of logic below this point during dry run.
+    if (ENV.DRY_RUN === true) {
+        throw new Error("[DRY_RUN] Chainlink access forbidden during dry run");
     }
-    // ----------------------
+    // -------------------------
 
     // 1. Validate Feed Address existence
     const address = CHAINLINK_FEEDS[asset]; 
