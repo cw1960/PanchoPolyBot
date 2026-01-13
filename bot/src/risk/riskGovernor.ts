@@ -4,6 +4,12 @@ import { Logger } from '../utils/logger';
 import { supabase } from '../services/supabase';
 import { ENV } from '../config/env';
 
+export interface TimeMetrics {
+  timeRemainingMs: number;
+  decayFactor: number;
+  isCutoff: boolean;
+}
+
 /**
  * The Risk Governor is the final authority. 
  * It operates independently of the strategy to prevent catastrophic loss.
@@ -12,6 +18,7 @@ import { ENV } from '../config/env';
  * 1. Global Kill Switch check
  * 2. Per-Market Hard Cap
  * 3. Global Hard Cap (Sum of all markets)
+ * 4. Time-Based Exposure Decay (New)
  */
 export class RiskGovernor {
   // Step 6 Constants
@@ -19,6 +26,45 @@ export class RiskGovernor {
   public static readonly MAX_PER_MARKET = 2000;       // Hard limit $2,000 per market
   public static readonly MAX_RISK_PER_TRADE = 0.05;   // 5% of Bankroll
   public static readonly VIRTUAL_BANKROLL = 5000;     // Assumed bankroll for sizing
+  
+  // Time Decay Constants (15-Minute Markets)
+  private readonly MARKET_DURATION_MS = 15 * 60 * 1000; // 900s
+  private readonly ENTRY_CUTOFF_MS = 3 * 60 * 1000;     // 180s (Hard Stop)
+
+  /**
+   * PURE FUNCTION: Calculates decay metrics based on expiry time.
+   * decayFactor = Linear 1.0 -> 0.0 over 15 minutes.
+   */
+  public calculateTimeMetrics(expiryIso?: string): TimeMetrics {
+      if (!expiryIso) {
+          // If no expiry is known, we assume full risk is allowed (early lifecycle)
+          // or block it. EdgeEngine handles hydration, so this is a fallback.
+          return { timeRemainingMs: this.MARKET_DURATION_MS, decayFactor: 1.0, isCutoff: false };
+      }
+
+      const now = Date.now();
+      const expiry = new Date(expiryIso).getTime();
+      const timeRemainingMs = Math.max(0, expiry - now);
+
+      // 1. Hard Cutoff Check
+      const isCutoff = timeRemainingMs <= this.ENTRY_CUTOFF_MS;
+
+      // 2. Linear Decay Calculation
+      // Clamp between 0 and 1
+      const rawRatio = timeRemainingMs / this.MARKET_DURATION_MS;
+      const decayFactor = Math.max(0, Math.min(1, rawRatio));
+
+      return { timeRemainingMs, decayFactor, isCutoff };
+  }
+
+  /**
+   * Helper to reduce trade size based on time remaining.
+   * Logic: effectiveSize = baseSize * decayFactor
+   */
+  public applySizeDecay(baseSize: number, expiryIso?: string): number {
+      const { decayFactor } = this.calculateTimeMetrics(expiryIso);
+      return baseSize * decayFactor;
+  }
 
   /**
    * Checks if a trade is safe to execute.
@@ -29,7 +75,6 @@ export class RiskGovernor {
   public async requestApproval(market: Market, amountUSDC: number, currentExposure: number): Promise<boolean> {
     
     // 1. Check Global Kill Switch (Live DB Check)
-    // This MUST run in all modes to ensure we can panic stop the bot.
     const { data: control, error } = await supabase.from('bot_control').select('desired_state').eq('id', 1).single();
     
     if (error || control?.desired_state !== 'running') {
@@ -37,10 +82,32 @@ export class RiskGovernor {
       return false;
     }
 
-    // 2. DRY RUN: Bypass ALL Exposure Limits
-    // We return immediately to avoid overhead and ensuring no cap is ever enforced.
+    // 2. TIME-BASED RISK CONTROLS (Run in DRY_RUN too for simulation accuracy)
+    const { isCutoff, decayFactor, timeRemainingMs } = this.calculateTimeMetrics(market.t_expiry);
+
+    // A. Hard Time Cutoff
+    if (isCutoff) {
+        Logger.warn(`[RISK] VETO: Entry Cutoff Active. Time Remaining: ${(timeRemainingMs/1000).toFixed(0)}s < 180s`);
+        return false;
+    }
+
+    // B. Decayed Max Exposure
+    // As time -> 0, Allowed Exposure -> 0.
+    // This forces the bot to stop adding risk and only hold or exit.
+    const dynamicMaxExposure = market.max_exposure * decayFactor;
+    
+    if (currentExposure + amountUSDC > dynamicMaxExposure) {
+        Logger.warn(`[RISK] VETO: Decayed Exposure Limit Hit.`, {
+            current: currentExposure,
+            add: amountUSDC,
+            limit: dynamicMaxExposure.toFixed(2),
+            decayFactor: decayFactor.toFixed(2)
+        });
+        return false;
+    }
+
+    // 3. DRY RUN: Bypass Global Caps (But keep time logic above for realism)
     if (ENV.DRY_RUN) {
-      Logger.info(`[RISK] DRY_RUN_BYPASS_GLOBAL_CAP`, { betSize: amountUSDC });
       return true;
     }
 
@@ -48,15 +115,9 @@ export class RiskGovernor {
     // LIVE MODE CHECKS BELOW
     // ---------------------------------------------------------
 
-    // 3. Check Market Hard Cap
+    // 4. Check Market Hard Cap
     if (currentExposure + amountUSDC > RiskGovernor.MAX_PER_MARKET) {
       Logger.warn(`[RISK] VETO: Hard Cap Reached ($${RiskGovernor.MAX_PER_MARKET}) for ${market.polymarket_market_id}.`);
-      return false;
-    }
-
-    // 4. Check Configured Market Exposure Limit
-    if (currentExposure + amountUSDC > market.max_exposure) {
-      Logger.warn(`[RISK] VETO: User Budget Limit Reached ($${market.max_exposure}).`);
       return false;
     }
 

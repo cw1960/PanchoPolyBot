@@ -23,6 +23,7 @@ export interface ScalingMetadata {
 export class ExecutionService {
   
   private static readonly MAX_ENTRY_PRICE_DEFAULT = 0.95;
+  private static readonly MIN_ORDER_SIZE_USD = 1.00; // Minimum viable bet size
 
   /**
    * Executes a Defensive Exit (Panic Close) for the entire position.
@@ -169,14 +170,27 @@ export class ExecutionService {
     }
     // ------------------------------------------------------------------
 
-    // SIZE LOGIC
-    let betSizeUSDC: number;
+    // SIZE LOGIC (BASE)
+    let rawBetSize: number;
     if (scalingMeta) {
-        betSizeUSDC = scalingMeta.tradeSizeOverride;
+        rawBetSize = scalingMeta.tradeSizeOverride;
     } else if (expParams.tradeSize && expParams.tradeSize > 0) {
-        betSizeUSDC = expParams.tradeSize;
+        rawBetSize = expParams.tradeSize;
     } else {
-        betSizeUSDC = riskGovernor.calculateBetSize();
+        rawBetSize = riskGovernor.calculateBetSize();
+    }
+
+    // SIZE LOGIC (DECAYED)
+    // effectiveSize = baseSize * confidence * decayFactor
+    // We apply confidence and time decay here to ensure sizing reflects risk.
+    const confidenceMultiplier = Math.max(0.5, obs.confidence); // Basic floor
+    const preDecaySize = rawBetSize * confidenceMultiplier;
+    const betSizeUSDC = riskGovernor.applySizeDecay(preDecaySize, market.t_expiry);
+
+    // MINIMUM SIZE CHECK
+    if (betSizeUSDC < ExecutionService.MIN_ORDER_SIZE_USD) {
+         Logger.info(`[EXEC] Trade Size too small after decay. ${betSizeUSDC.toFixed(3)} < ${ExecutionService.MIN_ORDER_SIZE_USD}`);
+         return { executed: false, newExposure: currentExposure };
     }
 
     const maxExposure = expParams.maxExposure || market.max_exposure || 50;
@@ -257,12 +271,13 @@ export class ExecutionService {
     }
 
     // 2. EXPOSURE CHECK
+    // Note: RiskGovernor also checks "Decayed Exposure Cap", but we check the absolute hard cap here first.
     if (!ENV.DRY_RUN && (currentExposure + betSizeUSDC > maxExposure)) {
       TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'MAX_EXPOSURE_HIT' });
       return { executed: false, newExposure: currentExposure };
     }
 
-    // 3. RISK APPROVAL
+    // 3. RISK APPROVAL (Includes Time Decay Cutoffs)
     const approved = await riskGovernor.requestApproval(market, betSizeUSDC, currentExposure);
     if (!approved) {
       TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'RISK_VETO' });
@@ -279,7 +294,7 @@ export class ExecutionService {
     const tokenId = sideToBuy === 'UP' ? tokens.up : tokens.down;
     const shares = Number((betSizeUSDC / executionPrice).toFixed(2));
 
-    Logger.info(`[${contextId}] EXEC ${sideToBuy} (${executionMode}): ${betSizeUSDC} USDC @ ${executionPrice.toFixed(3)} (Tier ${scalingMeta?.tierLevel || 0})`);
+    Logger.info(`[${contextId}] EXEC ${sideToBuy} (${executionMode}): ${betSizeUSDC.toFixed(2)} USDC @ ${executionPrice.toFixed(3)} (Tier ${scalingMeta?.tierLevel || 0})`);
 
     try {
       if (ENV.DRY_RUN) {
@@ -331,7 +346,7 @@ export class ExecutionService {
               });
           }
 
-          return { executed: false, simulated: true, newExposure: currentExposure };
+          return { executed: false, simulated: true, newExposure: currentExposure + betSizeUSDC };
       }
 
       // LIVE EXECUTION
@@ -344,7 +359,7 @@ export class ExecutionService {
         context: { orderId, shares, filledPrice: executionPrice, mode, dry_run: false, scaling: scalingMeta, executionMode, isMaker }
       });
       
-      Logger.info(`[EXPOSURE] CONSUME run=${market.active_run_id} market=${market.polymarket_market_id} +${betSizeUSDC}`);
+      Logger.info(`[EXPOSURE] CONSUME run=${market.active_run_id} market=${market.polymarket_market_id} +${betSizeUSDC.toFixed(2)}`);
 
       return { executed: true, newExposure: currentExposure + betSizeUSDC };
 
