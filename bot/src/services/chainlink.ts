@@ -22,19 +22,23 @@ export class ChainlinkService {
    * THROWS if no feed is configured for the asset.
    */
   public async getLatestPrice(asset: string, marketSlug: string): Promise<{ price: number; timestamp: number } | null> {
-    const address = CHAINLINK_FEEDS[asset]; // Direct lookup, no fallbacks
+    // 1. Normalize & Validate
+    const normalizedAsset = asset.toUpperCase();
+    const address = CHAINLINK_FEEDS[normalizedAsset]; 
 
-    // DIAGNOSTIC LOG (REQUIRED)
-    console.log(`[ORACLE_CALL] slug=${marketSlug} asset=${asset} feed=${address || 'UNDEFINED'}`);
+    // 2. REQUIRED LOG (Diagnostic)
+    // Must show exact parameters being used for the call
+    console.log(`[ORACLE_CALL] slug=${marketSlug} asset=${normalizedAsset} feed=${address || 'UNDEFINED'}`);
 
+    // 3. FAIL FAST (No Defaults)
     if (!address) {
-      Logger.error(`[CHAINLINK] FATAL: No feed configured for asset '${asset}'. Slug: ${marketSlug}`);
-      throw new Error(`[CHAINLINK] Configuration Error: No feed for ${asset}`);
+      const errorMsg = `[CHAINLINK_FATAL] No feed configured for asset '${normalizedAsset}' (Slug: ${marketSlug}). Aborting.`;
+      Logger.error(errorMsg);
+      throw new Error(errorMsg);
     }
 
     try {
       // Fetch latest round data from Chainlink public API
-      // This endpoint returns the exact data available on the aggregator contract
       const url = `${BASE_URL}/polygon-mainnet/${address}`;
       
       const response = await axios.get(url, { timeout: 3000 });
@@ -43,12 +47,12 @@ export class ChainlinkService {
         throw new Error("Invalid API response structure");
       }
 
-      // 1. Parse Price (Chainlink uses 8 decimals for USD pairs usually)
+      // 4. Parse Price (Chainlink uses 8 decimals for USD pairs usually)
       const rawPrice = BigInt(response.data.answer);
       const decimals = 8; 
       const price = Number(rawPrice) / Math.pow(10, decimals);
 
-      // 2. Parse Timestamp (API returns seconds, we need ms)
+      // 5. Parse Timestamp (API returns seconds, we need ms)
       const rawTimestamp = response.data.updatedAt || response.data.timestamp;
       const timestamp = Number(rawTimestamp) * 1000; 
 
@@ -56,7 +60,7 @@ export class ChainlinkService {
 
     } catch (err: any) {
       Logger.error(`Chainlink REST fetch failed for ${asset}`, err.message);
-      return null;
+      throw err; // Re-throw to ensure EdgeEngine knows this failed
     }
   }
 }

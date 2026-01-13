@@ -6,6 +6,7 @@ import { ENV } from '../config/env';
 import { BotControl, Market, TestRun } from '../types/tables';
 import { MarketRotator } from '../services/marketRotator';
 import { polymarket } from '../services/polymarket';
+import { marketResolver } from '../services/marketResolver';
 
 export class ControlLoop {
   private registry: MarketRegistry;
@@ -141,39 +142,32 @@ export class ControlLoop {
     // Group by asset to minimize API calls
     const assetRequests = new Map<string, typeof requests>();
     for(const r of requests) {
-       const key = `${r.asset}-${r.launch_type}`; // e.g. BTC-NEXT_15M
+       // Only bundling requests with same asset AND same launch_type
+       const key = `${r.asset}-${r.launch_type}`; 
        if(!assetRequests.has(key)) assetRequests.set(key, []);
        assetRequests.get(key)?.push(r);
     }
 
     for (const [key, group] of assetRequests) {
-        // 1. Resolve Market
         const asset = group[0].asset;
-        // Calc Expiry for NEXT 15M bucket
-        const now = Date.now();
-        const bucketDuration = 15 * 60 * 1000;
         
-        let nextStart = Math.ceil(now / bucketDuration) * bucketDuration;
-        if (nextStart <= now) nextStart += bucketDuration; // Ensure future
-        const nextEnd = nextStart + bucketDuration;
+        // USE MARKET RESOLVER instead of hardcoded time math
+        Logger.info(`[ORCHESTRATOR] Resolving next available market for ${asset}...`);
         
-        const expiryIso = new Date(nextEnd).toISOString();
-        const startIso = new Date(nextStart).toISOString();
-
-        Logger.info(`[ORCHESTRATOR] Resolving ${asset} for ${expiryIso}...`);
-
-        const marketData = await polymarket.findMarketForAssetAndExpiry(asset, expiryIso);
+        const marketData = await marketResolver.resolveNextMarket(asset);
         
         if (!marketData) {
-             Logger.warn(`[ORCHESTRATOR] No market found for ${asset} ${expiryIso}`);
-             await supabase.from('market_launch_requests').update({ status: 'FAILED', error_log: 'Market not found' }).in('id', group.map(r => r.id));
+             Logger.warn(`[ORCHESTRATOR] No upcoming 15m market found for ${asset}`);
+             // Mark failed so we don't retry forever in a tight loop
+             await supabase.from('market_launch_requests').update({ status: 'FAILED', error_log: 'Market Not Found via Resolver' }).in('id', group.map(r => r.id));
              continue;
         }
 
         const slug = marketData.slug;
+        const startIso = marketData.startDate;
 
-        // 2. Ensure Run Exists
-        const runName = `ORCH-${asset}-${new Date(nextStart).toISOString()}`;
+        // 2. Ensure Run Exists (Grouped by Asset + StartTime)
+        const runName = `ORCH-${asset}-${startIso}`;
         let { data: run } = await supabase.from('test_runs').select('id').eq('name', runName).maybeSingle();
         
         if (!run) {
@@ -189,6 +183,7 @@ export class ControlLoop {
 
         // 3. Upsert Markets for Requested Directions
         for (const req of group) {
+             // Check if market entry exists
              const { data: mk } = await supabase.from('markets')
                  .select('id')
                  .eq('polymarket_market_id', slug)
@@ -199,7 +194,10 @@ export class ControlLoop {
                  await supabase.from('markets').update({
                      enabled: true,
                      active_run_id: run.id,
-                     max_exposure: 500
+                     max_exposure: 500,
+                     // Ensure timestamp metadata is fresh
+                     t_open: marketData.startDate,
+                     t_expiry: marketData.endDate
                  }).eq('id', mk.id);
              } else {
                  await supabase.from('markets').insert({
@@ -211,7 +209,7 @@ export class ControlLoop {
                      max_exposure: 500,
                      t_open: marketData.startDate,
                      t_expiry: marketData.endDate,
-                     baseline_price: 0
+                     baseline_price: 0 // Will be hydrated by EdgeEngine
                  });
              }
              

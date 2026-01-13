@@ -57,7 +57,6 @@ export class EdgeEngine {
                 // B. Parse "Price To Beat" (Market Strike) from Text
                 if (!market.baseline_price) {
                     // Look for patterns like "$90,287.65" in the question or description.
-                    // Regex: Dollar sign, digits, commas, optional decimals.
                     const priceRegex = /\$([0-9,]+(\.[0-9]+)?)/;
                     const match = (meta.question || '').match(priceRegex) || (meta.description || '').match(priceRegex);
                     
@@ -109,9 +108,14 @@ export class EdgeEngine {
             }
             
             // Get trade at or immediately after t_open
-            // STRICT ASSET DERIVATION for fallback fetch
-            let derivedAsset = 'BTC'; // Minimal default for safety in hydration ONLY, edge case
-            try { derivedAsset = assetFromMarketSlug(market.polymarket_market_id); } catch(e) {}
+            // STRICT ASSET DERIVATION - NO DEFAULTS
+            let derivedAsset: string;
+            try {
+                derivedAsset = assetFromMarketSlug(market.polymarket_market_id);
+            } catch (e) {
+                Logger.warn(`[HYDRATE_FAIL] Asset derivation failed for ${market.polymarket_market_id}. Cannot fetch baseline.`);
+                return false;
+            }
 
             const trade = await this.spot.getHistoricalTrade(derivedAsset, startMs);
             
@@ -121,6 +125,8 @@ export class EdgeEngine {
                 if (diff <= 2000) {
                     market.baseline_price = trade.price;
                     updates.baseline_price = trade.price;
+                    // Auto-update asset metadata while we are here
+                    updates.asset = derivedAsset; 
                     Logger.info(`[HYDRATE] ${market.polymarket_market_id} Baseline (Binance Est): $${market.baseline_price} (Delta: ${diff}ms)`);
                 } else {
                     Logger.warn(`[HYDRATE] Baseline trade too far: ${diff}ms > 2000ms. Waiting for closer match.`);
@@ -174,10 +180,18 @@ export class EdgeEngine {
     
     // 2. Fetch Live Data
     // PASSING DERIVED ASSET + SLUG
-    const [clData, spotPrice] = await Promise.all([
-      this.chainlink.getLatestPrice(asset, market.polymarket_market_id),
-      this.spot.getSpotPrice(asset)
-    ]);
+    // Note: getLatestPrice will now throw if the asset is invalid or unmapped
+    let clData, spotPrice;
+    
+    try {
+      [clData, spotPrice] = await Promise.all([
+        this.chainlink.getLatestPrice(asset, market.polymarket_market_id),
+        this.spot.getSpotPrice(asset)
+      ]);
+    } catch (err: any) {
+      Logger.error(`[EDGE] Oracle Fetch Failed: ${err.message}`);
+      return null;
+    }
 
     if (!clData || !spotPrice) return null;
 

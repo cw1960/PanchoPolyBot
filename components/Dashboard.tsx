@@ -197,7 +197,7 @@ export const Dashboard: React.FC = () => {
   // --- ACTIONS ---
 
   const handleStartAllBots = async () => {
-    if(!confirm("Launch ALL 8 Isolated Bots for the NEXT 15m Market?")) return;
+    if(!confirm("Launch ALL 8 Isolated Bots for the NEXT AVAILABLE Market?")) return;
 
     // 1. Set Global State to Running
     await supabase.from('bot_control').update({ desired_state: 'running' }).eq('id', 1);
@@ -216,7 +216,7 @@ export const Dashboard: React.FC = () => {
     if (error) {
         alert("Failed to queue launch requests: " + error.message);
     } else {
-        alert("Orchestration Started: 8 Launch Requests Queued.");
+        alert("Orchestration Started: 8 Launch Requests Queued for Resolution.");
         // UI Optimistic Update
         setDesiredState('running');
     }
@@ -694,7 +694,7 @@ export const Dashboard: React.FC = () => {
                              onClick={handleStartAllBots}
                              className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded text-xs font-bold flex items-center gap-2 transition-all shadow-lg shadow-emerald-900/20"
                          >
-                             <Play size={12} fill="currentColor" /> START ALL (Next 15m)
+                             <Play size={12} fill="currentColor" /> LAUNCH ALL (NEXT AVAIL)
                          </button>
                          <button 
                              onClick={handleStopAllBots}
