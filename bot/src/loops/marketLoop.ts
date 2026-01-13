@@ -112,8 +112,16 @@ export class MarketLoop {
           this.scalingState.clipsPlaced = trades.length;
           this.scalingState.lastTierLevel = trades.length;
       } else {
-          this.scalingState.lockedDirection = null;
-          this._immutableAccount = null;
+          // ORCHESTRATION SUPPORT: If no trades yet, but market config enforces direction, lock it now.
+          if (this.market.direction) {
+              this.scalingState.lockedDirection = this.market.direction;
+              this._immutableAccount = accountManager.getAccount(this.market.asset, this.market.direction);
+              Logger.info(`[LOCK_FORCED] Market initialized with pre-set direction: ${this._immutableAccount.marketKey}`);
+          } else {
+              this.scalingState.lockedDirection = null;
+              this._immutableAccount = null;
+          }
+          
           this.scalingState.clipsPlaced = 0;
           this.scalingState.lastTierLevel = 0;
           this.scalingState.entryRegime = undefined;
@@ -213,7 +221,8 @@ export class MarketLoop {
       if (this.scalingState.lockedDirection) {
           // STRICT PATH: Use Immutable Account
           if (!this._immutableAccount) {
-              throw new Error("[INVARIANT_VIOLATION] Direction is locked but _immutableAccount is null.");
+              // Safety: Attempt re-resolution if somehow null (e.g. forced lock but no hydration yet)
+              this._immutableAccount = accountManager.getAccount(this.market.asset, this.scalingState.lockedDirection);
           }
           
           if (this._immutableAccount.direction !== this.scalingState.lockedDirection) {

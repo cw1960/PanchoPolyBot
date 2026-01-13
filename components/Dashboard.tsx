@@ -5,7 +5,7 @@ import {
   Terminal, BarChart3, Microscope, FastForward, History,
   Settings, Database, FlaskConical, Target, TrendingUp, Filter,
   CheckCircle, XCircle, AlertTriangle, Plus, Clipboard, Power, RefreshCw,
-  BrainCircuit, FileText, Search, ArrowRight, Download, RefreshCcw, Info, Trash2, Edit2, AlertCircle, X
+  BrainCircuit, FileText, Search, ArrowRight, Download, RefreshCcw, Info, Trash2, Edit2, AlertCircle, X, Rocket
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -82,6 +82,17 @@ interface ExperimentConfig {
 // --- UTILS ---
 const formatPct = (val: number) => `${(val * 100).toFixed(2)}%`;
 const formatUsd = (val: number) => `$${val.toFixed(3)}`;
+
+const ORCHESTRATION_TARGETS = [
+    { asset: "BTC", direction: "UP" },
+    { asset: "BTC", direction: "DOWN" },
+    { asset: "ETH", direction: "UP" },
+    { asset: "ETH", direction: "DOWN" },
+    { asset: "SOL", direction: "UP" },
+    { asset: "SOL", direction: "DOWN" },
+    { asset: "XRP", direction: "UP" },
+    { asset: "XRP", direction: "DOWN" },
+];
 
 // --- COMPONENT ---
 
@@ -174,6 +185,45 @@ export const Dashboard: React.FC = () => {
   };
 
   // --- ACTIONS ---
+
+  const handleStartAllBots = async () => {
+    if(!confirm("Launch ALL 8 Isolated Bots for the NEXT 15m Market?")) return;
+
+    // 1. Set Global State to Running
+    await supabase.from('bot_control').update({ desired_state: 'running' }).eq('id', 1);
+
+    // 2. Generate Launch Requests
+    const requests = ORCHESTRATION_TARGETS.map(t => ({
+        asset: t.asset,
+        direction: t.direction,
+        account_key: `${t.asset}_${t.direction}`,
+        launch_type: 'NEXT_15M',
+        status: 'PENDING'
+    }));
+
+    const { error } = await supabase.from('market_launch_requests').insert(requests);
+
+    if (error) {
+        alert("Failed to queue launch requests: " + error.message);
+    } else {
+        alert("Orchestration Started: 8 Launch Requests Queued.");
+        // UI Optimistic Update
+        setDesiredState('running');
+    }
+  };
+
+  const handleStopAllBots = async () => {
+      if(!confirm("STOP ALL BOTS? This will prevent new entries but allow defensive exits.")) return;
+      
+      const { error } = await supabase.from('bot_control').update({ desired_state: 'stopped' }).eq('id', 1);
+      
+      if (error) {
+          alert("Failed to stop: " + error.message);
+      } else {
+          alert("Global Stop Command Sent.");
+          setDesiredState('stopped');
+      }
+  };
 
   const handleStartTest = async () => {
       if (!newRunName || !targetSlug) {
@@ -475,7 +525,7 @@ export const Dashboard: React.FC = () => {
                           <div key={m.id} className="w-full bg-zinc-950/50 p-2 rounded border border-zinc-800 flex flex-col gap-2">
                               <div className="flex justify-between items-center">
                                   <span className="text-[10px] text-emerald-500 font-mono font-bold">
-                                      {m.asset || 'UNK'}
+                                      {m.asset || 'UNK'} {m.direction && `(${m.direction})`}
                                   </span>
                                   <button 
                                       onClick={() => handleKillMarket(m.id)}
@@ -618,6 +668,33 @@ export const Dashboard: React.FC = () => {
             {activeTab === 'TEST' && (
               <div className="space-y-6">
                 
+                {/* ORCHESTRATION PANEL */}
+                <div className="bg-zinc-900/30 p-4 rounded border border-zinc-800 flex items-center justify-between">
+                     <div className="flex items-center gap-3">
+                         <div className="p-2 bg-emerald-900/20 rounded-full border border-emerald-900/50">
+                             <Rocket size={20} className="text-emerald-500" />
+                         </div>
+                         <div>
+                             <h3 className="text-sm font-bold text-white uppercase">Orchestration</h3>
+                             <p className="text-xs text-zinc-500">Mass-launch isolated bots for 8 markets</p>
+                         </div>
+                     </div>
+                     <div className="flex gap-2">
+                         <button 
+                             onClick={handleStartAllBots}
+                             className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded text-xs font-bold flex items-center gap-2 transition-all shadow-lg shadow-emerald-900/20"
+                         >
+                             <Play size={12} fill="currentColor" /> START ALL (Next 15m)
+                         </button>
+                         <button 
+                             onClick={handleStopAllBots}
+                             className="bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-900 px-4 py-2 rounded text-xs font-bold flex items-center gap-2 transition-all"
+                         >
+                             <Square size={12} fill="currentColor" /> STOP ALL ACTIVE
+                         </button>
+                     </div>
+                </div>
+
                 {/* EXPERIMENT CONTROL PLANE */}
                 <div className="bg-zinc-900/50 p-6 rounded border border-zinc-800 relative overflow-hidden group">
                     <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity duration-700">

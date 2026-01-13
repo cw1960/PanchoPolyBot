@@ -92,3 +92,15 @@ export interface TradeLedgerRow {
   closed_at?: string;
   metadata?: any;
 }
+
+export interface MarketLaunchRequest {
+  id?: number; 
+  asset: string;
+  direction: 'UP' | 'DOWN';
+  account_key: string;
+  launch_type: 'NEXT_15M';
+  status: 'PENDING' | 'LAUNCHED' | 'CANCELLED' | 'FAILED';
+  created_at?: string;
+  target_market_slug?: string;
+  error_log?: string;
+}
