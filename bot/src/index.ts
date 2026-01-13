@@ -1,3 +1,4 @@
+import 'dotenv/config';
 
 import { validateEnv } from './config/env';
 import { ControlLoop } from './loops/controlLoop';
