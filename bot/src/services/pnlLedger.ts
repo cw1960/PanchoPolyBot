@@ -94,7 +94,6 @@ export class PnLLedgerService {
          const exitTimestamp = new Date().toISOString();
 
          // 1. ATOMIC UPDATE: Fetch only the rows we successfully transition from OPEN -> CLOSED.
-         // This guarantees that if this function runs twice, the second run finds 0 rows.
          const { data: closedTrades, error } = await supabase
             .from('trade_ledger')
             .update({
@@ -107,7 +106,7 @@ export class PnLLedgerService {
             })
             .eq('run_id', runId)
             .eq('market_id', marketId)
-            .eq('status', 'OPEN') // Critical Gatekeeper
+            .eq('status', 'OPEN') // Predicate: Must be OPEN
             .select();
 
          if (error) {
@@ -116,7 +115,7 @@ export class PnLLedgerService {
          }
 
          if (!closedTrades || closedTrades.length === 0) {
-             Logger.info(`[PNL_CLOSE] No OPEN trades found to close for ${marketId} (Idempotent Check Passed)`);
+             Logger.info(`[CAPITAL_RELEASE_SKIPPED_ALREADY_SETTLED] Defensive Exit for ${marketId} found 0 OPEN trades.`);
              return;
          }
 
@@ -170,7 +169,7 @@ export class PnLLedgerService {
             })
             .eq('run_id', runId)
             .eq('market_id', marketId)
-            .eq('status', 'OPEN') // Critical Gatekeeper
+            .eq('status', 'OPEN') // Predicate: Must be OPEN
             .select('*, markets(asset)'); // We need asset info
 
         if (error) {
@@ -179,7 +178,7 @@ export class PnLLedgerService {
         }
 
         if (!closedTrades || closedTrades.length === 0) {
-            Logger.info(`[PNL_SETTLE] No OPEN trades found for ${marketId} (Idempotent Check Passed)`);
+            Logger.info(`[CAPITAL_RELEASE_SKIPPED_ALREADY_SETTLED] Settlement for ${marketId} found 0 OPEN trades.`);
             return;
         }
 

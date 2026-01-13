@@ -102,9 +102,9 @@ export class MarketLoop {
           const firstTrade = trades[0];
           this.scalingState.lockedDirection = firstTrade.side as 'UP' | 'DOWN';
           
-          // RE-ESTABLISH INVARIANT ON HYDRATION
+          // RE-ESTABLISH INVARIANT ON HYDRATION (Restart Safety)
           this._immutableAccount = accountManager.getAccount(this.market.asset, this.scalingState.lockedDirection);
-          Logger.info(`[INVARIANT_RESTORE] Locked Account: ${this._immutableAccount.marketKey}`);
+          Logger.info(`[LOCK_RESTORED] Market=${this.market.polymarket_market_id} Account=${this._immutableAccount.marketKey}`);
 
           if (firstTrade.signals) {
               this.scalingState.entryRegime = firstTrade.signals.regime;
@@ -218,6 +218,11 @@ export class MarketLoop {
           
           if (this._immutableAccount.direction !== this.scalingState.lockedDirection) {
                throw new Error(`[INVARIANT_VIOLATION] Locked Direction ${this.scalingState.lockedDirection} mismatch with Account ${this._immutableAccount.direction}`);
+          }
+
+          // SIGNAL FLIP GUARD: Even if observation says DOWN, we stay locked UP
+          if (observation.direction !== 'NEUTRAL' && observation.direction !== this.scalingState.lockedDirection) {
+              Logger.warn(`[LOCK_PERSISTS_SIGNAL_IGNORED] Locked=${this.scalingState.lockedDirection} Signal=${observation.direction}`);
           }
 
           activeAccount = this._immutableAccount;
