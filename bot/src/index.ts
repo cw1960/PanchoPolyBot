@@ -1,4 +1,5 @@
 import 'dotenv/config';
+Logger.info(`[CONFIG] DRY_RUN=${process.env.DRY_RUN}`);
 
 import { validateEnv } from './config/env';
 import { ControlLoop } from './loops/controlLoop';
