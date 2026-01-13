@@ -12,7 +12,8 @@ export const ENV = {
   
   // Safety: Dry Run Mode
   // If set to true, the execution engine will simulate trades but NOT send them to Polymarket.
-  DRY_RUN: process.env.DRY_RUN === 'true', 
+  // DEFAULTS TO TRUE FOR SAFETY unless explicitly set to 'false'
+  DRY_RUN: process.env.DRY_RUN !== 'false', 
 
   // Trading Credentials
   PRIVATE_KEY: process.env.PRIVATE_KEY || '',

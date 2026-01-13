@@ -42,6 +42,7 @@ export class ExecutionService {
       
       const contextId = `EXIT-${Date.now()}`;
       const mode = ENV.DRY_RUN ? 'DRY_RUN' : 'LIVE';
+      const logPrefix = ENV.DRY_RUN ? '[DRY_RUN] ' : '';
       const runId = market.active_run_id;
 
       if (!runId) return { executed: false };
@@ -53,12 +54,12 @@ export class ExecutionService {
           throw new Error(`[INVARIANT_VIOLATION] Defensive exit attempted with zero/negative exposure: ${position.shares}`);
       }
 
-      Logger.info(`[${contextId}] DEFENSIVE EXIT ${lockedDirection} (${reasonDetails.reason}): Closing ${position.shares.toFixed(2)} shares.`);
+      Logger.info(`${logPrefix}[${contextId}] DEFENSIVE EXIT ${lockedDirection} (${reasonDetails.reason}): Closing ${position.shares.toFixed(2)} shares.`);
 
       // 2. Resolve Tokens
       const tokens = await polymarket.getTokens(market.polymarket_market_id);
       if (!tokens) {
-          Logger.error(`[${contextId}] Tokens not found for exit.`);
+          Logger.error(`${logPrefix}[${contextId}] Tokens not found for exit.`);
           return { executed: false };
       }
 
@@ -92,7 +93,8 @@ export class ExecutionService {
                       reasonDetails
                   }
               });
-
+              
+              Logger.info(`${logPrefix}[${contextId}] SIMULATED EXIT COMPLETE.`);
               return { executed: true };
           } 
 
@@ -144,6 +146,7 @@ export class ExecutionService {
     
     const contextId = `EXEC-${Date.now()}`;
     const mode = ENV.DRY_RUN ? 'DRY_RUN' : 'LIVE';
+    const logPrefix = ENV.DRY_RUN ? '[DRY_RUN] ' : '';
     
     // ---------------------------------------------------------
     // INVARIANT 1: IMMUTABLE DIRECTION/ACCOUNT CHECK
@@ -161,7 +164,7 @@ export class ExecutionService {
 
     // RESOLVE ACCOUNT
     const account = accountManager.getAccount(market.asset, direction);
-    Logger.info(`[ACCOUNT_RESOLVED] ${account.marketKey} for Market ${market.polymarket_market_id}`);
+    Logger.info(`${logPrefix}[ACCOUNT_RESOLVED] ${account.marketKey} for Market ${market.polymarket_market_id}`);
 
     // HARD ASSERT: If locked, account must match lock
     if (scalingMeta?.lockedDirection) {
@@ -202,7 +205,7 @@ export class ExecutionService {
 
     // MINIMUM SIZE CHECK
     if (betSizeUSDC < ExecutionService.MIN_ORDER_SIZE_USD) {
-         Logger.info(`[EXEC] Trade Size too small after decay. ${betSizeUSDC.toFixed(3)} < ${ExecutionService.MIN_ORDER_SIZE_USD}`);
+         Logger.info(`${logPrefix}[EXEC] Trade Size too small after decay. ${betSizeUSDC.toFixed(3)} < ${ExecutionService.MIN_ORDER_SIZE_USD}`);
          return { executed: false, newExposure: account.currentExposure };
     }
 
@@ -303,7 +306,7 @@ export class ExecutionService {
     const sharesTotal = Number((betSizeUSDC / executionPrice).toFixed(2));
     let sharesRemaining = sharesTotal;
     
-    Logger.info(`[${contextId}] EXEC_REQ ${sideToBuy} (${executionMode}): $${betSizeUSDC.toFixed(2)} (${sharesTotal} shares)`);
+    Logger.info(`${logPrefix}[${contextId}] EXEC_REQ ${sideToBuy} (${executionMode}): $${betSizeUSDC.toFixed(2)} (${sharesTotal} shares)`);
 
     // =========================================================
     // MAKER-FIRST EXECUTION BLOCK
@@ -410,15 +413,17 @@ export class ExecutionService {
                const fillThreshold = 0.40; // 40% chance
                
                if (fillRoll > fillThreshold) {
-                   Logger.info(`[DRY_RUN] Passive Order NOT Filled (Roll: ${fillRoll.toFixed(2)} > ${fillThreshold})`);
+                   Logger.info(`${logPrefix}[DRY_RUN] Passive Order NOT Filled (Roll: ${fillRoll.toFixed(2)} > ${fillThreshold})`);
                    return { executed: false, newExposure: account.currentExposure };
                } else {
-                   Logger.info(`[DRY_RUN] Passive Order FILLED (Simulated)`);
+                   Logger.info(`${logPrefix}[DRY_RUN] Passive Order FILLED (Simulated)`);
                }
           }
 
           await new Promise(r => setTimeout(r, 200)); 
           
+          Logger.info(`${logPrefix}[${contextId}] SIMULATED EXECUTION: ${sharesTotal} shares @ ${executionPrice}`);
+
           TradeLogger.log({ 
             ...eventPayload, 
             status: 'EXECUTED', 
