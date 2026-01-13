@@ -248,6 +248,30 @@ class PolymarketService {
     const response = await this.client.postOrder(order);
     return response.orderID;
   }
+
+  /**
+   * Cancels a specific order by ID.
+   */
+  public async cancelOrder(orderId: string) {
+    if (!this.client) return;
+    try {
+      await this.client.cancelOrder({ orderID: orderId });
+    } catch (e) {
+      Logger.warn(`[POLY_API] Cancel failed for ${orderId}`, e);
+    }
+  }
+
+  /**
+   * Retrieves order details (used to check sizeMatched/fill status).
+   */
+  public async getOrder(orderId: string): Promise<any | null> {
+    if (!this.client) return null;
+    try {
+      return await this.client.getOrder(orderId);
+    } catch (e) {
+      return null;
+    }
+  }
 }
 
 export const polymarket = new PolymarketService();

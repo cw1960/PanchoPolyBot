@@ -21,6 +21,11 @@ export interface ScalingMetadata {
     lockedDirection?: 'UP' | 'DOWN' | null; // SAFETY: Authoritative Lock from MarketLoop
 }
 
+// --- MAKER CONFIG ---
+const ENABLE_MAKER_FIRST = true;
+const MAKER_TIMEOUT_MS = 1500;
+// --------------------
+
 export class ExecutionService {
   
   private static readonly MAX_ENTRY_PRICE_DEFAULT = 0.95;
@@ -91,7 +96,7 @@ export class ExecutionService {
               return { executed: true };
           } 
 
-          // LIVE EXECUTION
+          // LIVE EXECUTION (MARKET FALLBACK ONLY FOR EXIT - NO MAKER)
           const depth = await polymarket.getMarketDepth(tokenId);
           const sellPrice = depth?.bestBid || 0.01; 
 
@@ -290,9 +295,112 @@ export class ExecutionService {
     }
     const sideToBuy = obs.direction === 'UP' ? 'UP' : 'DOWN';
     const tokenId = sideToBuy === 'UP' ? tokens.up : tokens.down;
-    const shares = Number((betSizeUSDC / executionPrice).toFixed(2));
+    
+    // Calculate total shares requested based on Taker Price (Base assumption)
+    // If maker fills, price is better, so shares are constant? Or USD is constant?
+    // Usually size is shares. 
+    // Let's stick to Size = USD / Price.
+    const sharesTotal = Number((betSizeUSDC / executionPrice).toFixed(2));
+    let sharesRemaining = sharesTotal;
+    
+    Logger.info(`[${contextId}] EXEC_REQ ${sideToBuy} (${executionMode}): $${betSizeUSDC.toFixed(2)} (${sharesTotal} shares)`);
 
-    Logger.info(`[${contextId}] EXEC ${sideToBuy} (${executionMode}): ${betSizeUSDC.toFixed(2)} USDC @ ${executionPrice.toFixed(3)} (Tier ${scalingMeta?.tierLevel || 0})`);
+    // =========================================================
+    // MAKER-FIRST EXECUTION BLOCK
+    // =========================================================
+    let makerFilled = false;
+
+    if (ENABLE_MAKER_FIRST && !ENV.DRY_RUN) {
+        try {
+            // A. Get Maker Price (Best Bid)
+            // We want to sit on the bid to buy.
+            const depth = await polymarket.getMarketDepth(tokenId);
+            
+            // Only attempt if there is a bid to join
+            if (depth && depth.bestBid > 0) {
+                const makerPrice = depth.bestBid;
+                
+                Logger.info(`[MAKER_ATTEMPT] market=${market.polymarket_market_id} side=${sideToBuy} size=${sharesTotal} price=${makerPrice}`);
+                
+                // B. Place Limit Order
+                const makerOrderId = await polymarket.placeOrder(tokenId, 'BUY', makerPrice, sharesTotal);
+                
+                // C. Wait Timeout
+                await new Promise(r => setTimeout(r, MAKER_TIMEOUT_MS));
+
+                // D. Cancel & Check
+                await polymarket.cancelOrder(makerOrderId);
+                const order = await polymarket.getOrder(makerOrderId);
+                
+                if (order) {
+                    const matchedSize = parseFloat(order.sizeMatched || '0');
+                    if (matchedSize > 0) {
+                        makerFilled = true;
+                        
+                        // Update tracking
+                        const makerUsdSpent = matchedSize * makerPrice;
+                        sharesRemaining = sharesTotal - matchedSize;
+                        
+                        Logger.info(`[MAKER_FILLED] filled=${matchedSize} shares @ ${makerPrice}`);
+                        
+                        // Log Maker Part
+                        TradeLogger.log({ 
+                            ...eventPayload, 
+                            status: 'EXECUTED', 
+                            decision_reason: 'MAKER_FILL',
+                            entry_prob: makerPrice,
+                            stake_usd: makerUsdSpent,
+                            context: { ...eventPayload.context, type: 'MAKER', orderId: makerOrderId, shares: matchedSize }
+                        });
+                        
+                        // Ledger & Account Update
+                        if (market.active_run_id) {
+                            await pnlLedger.recordOpenTrade({
+                                run_id: market.active_run_id,
+                                market_id: market.id,
+                                polymarket_market_id: market.polymarket_market_id,
+                                mode: 'LIVE',
+                                side: sideToBuy === 'UP' ? 'YES' : 'NO',
+                                size_usd: makerUsdSpent,
+                                entry_price: makerPrice,
+                                status: 'OPEN',
+                                realized_pnl: 0,
+                                unrealized_pnl: 0,
+                                opened_at: new Date().toISOString(),
+                                metadata: { ...eventPayload.context, maker: true }
+                            });
+                            accountManager.updateExposure(market.asset, direction, makerUsdSpent);
+                        }
+                        
+                        if (sharesRemaining <= 0) {
+                            return { executed: true, newExposure: account.currentExposure };
+                        } else {
+                            Logger.info(`[MAKER_PARTIAL] Remaining shares to taker: ${sharesRemaining.toFixed(2)}`);
+                        }
+                    } else {
+                        Logger.info(`[MAKER_TIMEOUT_FALLBACK] No fill after ${MAKER_TIMEOUT_MS}ms. Proceeding to Taker.`);
+                    }
+                }
+            }
+        } catch (err) {
+            Logger.warn(`[MAKER_ERROR] Fallback to Taker immediately`, err);
+        }
+    }
+
+    // =========================================================
+    // TAKER EXECUTION (FALLBACK / REMAINDER)
+    // =========================================================
+    
+    // Risk Re-Check (Required by prompt)
+    if (makerFilled && sharesRemaining > 0) {
+        // If we filled some, verify we are still good to take the rest
+        const takerUsdNeeded = sharesRemaining * executionPrice;
+        const reApproved = await riskGovernor.requestApproval(market, account, takerUsdNeeded);
+        if (!reApproved) {
+             Logger.warn(`[RISK_VETO_FALLBACK] Stopped Taker fill after partial Maker fill.`);
+             return { executed: true, newExposure: account.currentExposure }; // Executed true because partial fill happened
+        }
+    }
 
     try {
       if (ENV.DRY_RUN) {
@@ -315,7 +423,7 @@ export class ExecutionService {
             ...eventPayload, 
             status: 'EXECUTED', 
             decision_reason: 'DRY_RUN_EXEC',
-            context: { orderId: 'DRY-RUN-ID', shares, filledPrice: executionPrice, mode, dry_run: true, scaling: scalingMeta, executionMode, isMaker }
+            context: { orderId: 'DRY-RUN-ID', shares: sharesTotal, filledPrice: executionPrice, mode, dry_run: true, scaling: scalingMeta, executionMode, isMaker }
           });
           
           const ledgerSide = sideToBuy === 'UP' ? 'YES' : 'NO';
@@ -351,20 +459,22 @@ export class ExecutionService {
           return { executed: false, simulated: true, newExposure: account.currentExposure };
       }
 
-      // LIVE EXECUTION
-      const orderId = await polymarket.placeOrder(tokenId, 'BUY', executionPrice, shares);
-      
+      // LIVE EXECUTION (TAKER)
+      const takerOrderId = await polymarket.placeOrder(tokenId, 'BUY', executionPrice, sharesRemaining);
+      const takerUsd = sharesRemaining * executionPrice;
+
       TradeLogger.log({ 
         ...eventPayload, 
         status: 'EXECUTED', 
         decision_reason: 'EXECUTED',
-        context: { orderId, shares, filledPrice: executionPrice, mode, dry_run: false, scaling: scalingMeta, executionMode, isMaker }
+        stake_usd: takerUsd,
+        context: { orderId: takerOrderId, shares: sharesRemaining, filledPrice: executionPrice, mode, dry_run: false, scaling: scalingMeta, executionMode, isMaker }
       });
       
-      Logger.info(`[EXPOSURE] CONSUME run=${market.active_run_id} market=${market.polymarket_market_id} +${betSizeUSDC.toFixed(2)}`);
+      Logger.info(`[TAKER_EXECUTED] ${sharesRemaining} shares @ ${executionPrice}`);
       
       // CRITICAL: UPDATE ISOLATED ACCOUNT EXPOSURE
-      accountManager.updateExposure(market.asset, direction, betSizeUSDC);
+      accountManager.updateExposure(market.asset, direction, takerUsd);
 
       return { executed: true, newExposure: account.currentExposure };
 
