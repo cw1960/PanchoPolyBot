@@ -48,8 +48,7 @@ export const ENV = {
 export function validateEnv() {
   const missing: string[] = [];
 
-  // EXECUTION_MODE is the sole authority for LIVE vs PAPER
-  const executionMode = EXECUTION_MODE === 'LIVE' ? 'LIVE' : 'PAPER';
+  const executionMode = ENV.EXECUTION_MODE === 'LIVE' ? 'LIVE' : 'PAPER';
 
   // ---- Always required ----
   if (!ENV.SUPABASE_URL) missing.push('SUPABASE_URL');
@@ -74,7 +73,7 @@ export function validateEnv() {
 
   // ---- PAPER mode safety invariant ----
   // PAPER must use REAL oracles (no mock data)
-  if (executionMode === 'PAPER' && DRY_RUN !== false) {
+  if (executionMode === 'PAPER' && ENV.DRY_RUN !== false) {
     throw new Error(
       `[CONFIG_FATAL] PAPER mode requires DRY_RUN=false (real oracles)`
     );
@@ -87,4 +86,3 @@ export function validateEnv() {
       : '[MODE] EXECUTION_MODE=PAPER (execution disabled)'
   );
 }
-
