@@ -1,4 +1,10 @@
 
+// CRITICAL SAFETY GUARD
+// This file MUST NOT be loaded in DRY_RUN mode.
+if (process.env.DRY_RUN !== 'false') {
+  throw new Error('FATAL: SpotPriceService loaded while DRY_RUN=true. This is a bug. Consumers must use Mocks.');
+}
+
 import axios from 'axios';
 import { Logger } from '../utils/logger';
 import { Asset } from '../types/assets';
@@ -23,7 +29,6 @@ export class SpotPriceService {
     } catch (e) { /* Ignore timeouts/errors */ }
 
     if (prices.length === 0) {
-      // Logger.warn(`Failed to fetch spot prices for ${asset}`);
       return null;
     }
 
@@ -34,10 +39,8 @@ export class SpotPriceService {
 
   /**
    * Fetches the first trade at or after timestamp.
-   * Uses Binance AggTrades for high precision.
    */
   public async getHistoricalTrade(asset: Asset, timestampMs: number): Promise<{ price: number, time: number } | null> {
-      // Map Asset Enum to specific Binance Symbols if needed
       let sym = '';
       if (asset === Asset.BTC) sym = 'BTCUSDT';
       else if (asset === Asset.ETH) sym = 'ETHUSDT';
@@ -52,7 +55,6 @@ export class SpotPriceService {
           
           if (res.data && res.data.length > 0) {
               const trade = res.data[0];
-              // trade object: { a: aggTradeId, p: price, q: quantity, f: firstTradeId, l: lastTradeId, T: timestamp, ... }
               return { 
                   price: parseFloat(trade.p), 
                   time: trade.T 

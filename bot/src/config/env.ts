@@ -4,6 +4,10 @@ import { Logger } from '../utils/logger';
 
 dotenv.config();
 
+// Authoritative DRY_RUN constant
+// Defaults to TRUE (Safe Mode) if not explicitly set to 'false'
+export const DRY_RUN = process.env.DRY_RUN !== 'false';
+
 export const ENV = {
   SUPABASE_URL: process.env.SUPABASE_URL || '',
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
@@ -11,9 +15,7 @@ export const ENV = {
   POLL_INTERVAL_MS: parseInt(process.env.POLL_INTERVAL_MS || '1000', 10),
   
   // Safety: Dry Run Mode
-  // If set to true, the execution engine will simulate trades but NOT send them to Polymarket.
-  // DEFAULTS TO TRUE FOR SAFETY unless explicitly set to 'false'
-  DRY_RUN: process.env.DRY_RUN !== 'false', 
+  DRY_RUN: DRY_RUN,
 
   // Trading Credentials
   PRIVATE_KEY: process.env.PRIVATE_KEY || '',

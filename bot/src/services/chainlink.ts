@@ -1,8 +1,13 @@
 
+// CRITICAL SAFETY GUARD
+// This file MUST NOT be loaded in DRY_RUN mode.
+if (process.env.DRY_RUN !== 'false') {
+  throw new Error('FATAL: ChainlinkService loaded while DRY_RUN=true. This is a bug. Consumers must use Mocks.');
+}
+
 import axios from 'axios';
 import { Logger } from '../utils/logger';
 import { Asset } from '../types/assets';
-import { ENV } from '../config/env';
 
 // STRICT MAPPING - NO DEFAULTS
 // Polygon Mainnet Aggregator Addresses
@@ -20,23 +25,13 @@ export class ChainlinkService {
   
   /**
    * Fetches the latest price from the Chainlink feed.
-   * REQUIRES explicit Asset enum and slug.
-   * THROWS if no feed is configured for the asset.
    */
   public async getLatestPrice(asset: Asset, marketSlug: string): Promise<{ price: number; timestamp: number } | null> {
     
-    // --- DRY RUN HARD GATE ---
-    // Strictly forbids any execution of logic below this point during dry run.
-    if (ENV.DRY_RUN === true) {
-        throw new Error("[DRY_RUN] Chainlink access forbidden during dry run");
-    }
-    // -------------------------
-
     // 1. Validate Feed Address existence
     const address = CHAINLINK_FEEDS[asset]; 
 
     // 2. REQUIRED LOG (Diagnostic)
-    // Must show exact parameters being used for the call
     console.log(`[ORACLE_CALL] slug=${marketSlug} asset=${asset} feed=${address || 'UNDEFINED'}`);
 
     // 3. FAIL FAST (No Defaults)
@@ -56,12 +51,12 @@ export class ChainlinkService {
         throw new Error("Invalid API response structure");
       }
 
-      // 4. Parse Price (Chainlink uses 8 decimals for USD pairs usually)
+      // 4. Parse Price
       const rawPrice = BigInt(response.data.answer);
       const decimals = 8; 
       const price = Number(rawPrice) / Math.pow(10, decimals);
 
-      // 5. Parse Timestamp (API returns seconds, we need ms)
+      // 5. Parse Timestamp
       const rawTimestamp = response.data.updatedAt || response.data.timestamp;
       const timestamp = Number(rawTimestamp) * 1000; 
 
@@ -69,7 +64,7 @@ export class ChainlinkService {
 
     } catch (err: any) {
       Logger.error(`Chainlink REST fetch failed for ${asset}`, err.message);
-      throw err; // Re-throw to ensure EdgeEngine knows this failed
+      throw err;
     }
   }
 }
