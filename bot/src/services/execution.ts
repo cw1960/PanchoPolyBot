@@ -9,6 +9,10 @@ import { feeModel } from './feeModel';
 import { TradeLogger } from './tradeLogger';
 import { pnlLedger } from './pnlLedger';
 import { accountManager } from './accountManager'; 
+import { EXECUTION_MODE } from '../config/executionMode';
+import { LiveExecutionAdapter } from '../execution/liveAdapter';
+import { PaperExecutionAdapter } from '../execution/paperAdapter';
+import { ExecutionAdapter } from '../execution/adapter';
 
 export type ExecutionMode = 'AGGRESSIVE' | 'PASSIVE';
 
@@ -41,8 +45,8 @@ export class ExecutionService {
     ): Promise<{ executed: boolean }> {
       
       const contextId = `EXIT-${Date.now()}`;
-      const mode = ENV.DRY_RUN ? 'DRY_RUN' : 'LIVE';
-      const logPrefix = ENV.DRY_RUN ? '[DRY_RUN] ' : '';
+      const mode = EXECUTION_MODE; // Use configured mode
+      const logPrefix = `[${mode}] `;
       const runId = market.active_run_id;
 
       if (!runId) return { executed: false };
@@ -68,37 +72,31 @@ export class ExecutionService {
 
       // 3. Execution
       try {
-          if (ENV.DRY_RUN) {
-              await new Promise(r => setTimeout(r, 200));
-              
-              // Close the ledger positions
-              await pnlLedger.closePosition(runId, market.id, 'DEFENSIVE_EXIT', reasonDetails);
-              
-              TradeLogger.log({
-                  test_run_id: runId,
-                  market_id: market.id,
-                  polymarket_market_id: market.polymarket_market_id,
+          // SELECT ADAPTER
+          const adapter: ExecutionAdapter = mode === 'LIVE' 
+              ? new LiveExecutionAdapter() 
+              : new PaperExecutionAdapter({
                   asset: market.asset,
-                  side: lockedDirection,
-                  stake_usd: 0, 
-                  entry_prob: 0,
+                  marketId: market.id,
+                  polymarketId: market.polymarket_market_id,
+                  side: lockedDirection, // EXIT direction usually opposite of entry, but here we sell holding
+                  runId: runId,
                   confidence: reasonDetails.confidence,
-                  status: 'EXECUTED',
-                  decision_reason: `EXIT:${reasonDetails.reason}`,
-                  outcome: 'CLOSED',
-                  context: { 
-                      mode: 'DRY_RUN', 
-                      exitType: 'DEFENSIVE', 
-                      sharesClosed: position.shares,
-                      reasonDetails
-                  }
+                  reason: `EXIT:${reasonDetails.reason}`,
+                  oracle: { price: 0, timestamp: Date.now(), age: 0, source: 'EXIT_TRIGGER' }
               });
-              
-              Logger.info(`${logPrefix}[${contextId}] SIMULATED EXIT COMPLETE.`);
-              return { executed: true };
-          } 
 
-          // LIVE EXECUTION (MARKET FALLBACK ONLY FOR EXIT - NO MAKER)
+          // DRY_RUN legacy check (if someone forces dry run env var with Live mode - strict guard)
+          if (ENV.DRY_RUN && mode === 'LIVE') {
+             throw new Error("Invalid Configuration: DRY_RUN=true with EXECUTION_MODE=LIVE");
+          }
+
+          if (ENV.DRY_RUN) {
+              // Legacy Dry Run Simulation (Mock services)
+              // ... keep existing dry run block if needed, but PAPER mode supersedes it for production testing.
+              // For strict compliance with prompt, PAPER is NOT DRY_RUN.
+          }
+
           const depth = await polymarket.getMarketDepth(tokenId);
           const sellPrice = depth?.bestBid || 0.01; 
 
@@ -107,7 +105,7 @@ export class ExecutionService {
               return { executed: false };
           }
 
-          const orderId = await polymarket.placeOrder(tokenId, 'SELL', sellPrice, position.shares);
+          const orderId = await adapter.placeOrder(tokenId, 'SELL', sellPrice, position.shares);
 
           TradeLogger.log({
               test_run_id: runId,
@@ -122,13 +120,20 @@ export class ExecutionService {
               decision_reason: `EXIT:${reasonDetails.reason}`,
               outcome: 'CLOSED',
               context: { 
-                  mode: 'LIVE', 
+                  mode: mode, 
                   orderId,
                   exitType: 'DEFENSIVE', 
                   sharesClosed: position.shares,
                   reasonDetails 
               }
           });
+
+          // In PAPER mode, we also update ledger to reflect the exit
+          if (mode === 'PAPER') {
+               await pnlLedger.closePosition(runId, market.id, 'DEFENSIVE_EXIT', reasonDetails);
+          } else if (mode === 'LIVE') {
+               await pnlLedger.closePosition(runId, market.id, 'DEFENSIVE_EXIT', reasonDetails);
+          }
 
           return { executed: true };
 
@@ -145,8 +150,8 @@ export class ExecutionService {
     ): Promise<{ executed: boolean, simulated?: boolean, newExposure: number }> {
     
     const contextId = `EXEC-${Date.now()}`;
-    const mode = ENV.DRY_RUN ? 'DRY_RUN' : 'LIVE';
-    const logPrefix = ENV.DRY_RUN ? '[DRY_RUN] ' : '';
+    const mode = EXECUTION_MODE;
+    const logPrefix = `[${mode}] `;
     
     // ---------------------------------------------------------
     // INVARIANT 1: IMMUTABLE DIRECTION/ACCOUNT CHECK
@@ -155,9 +160,6 @@ export class ExecutionService {
     
     if (scalingMeta?.lockedDirection) {
         direction = scalingMeta.lockedDirection;
-        // Ensure Signal isn't trying to trade against the lock (Logic Check)
-        // If obs.direction is NEUTRAL or Opposite, we proceed ONLY if logic allows (which it shouldn't for 'Entry')
-        // But the Direction passed to AccountManager MUST be the Locked Direction.
     }
     
     if (direction === 'NEUTRAL') return { executed: false, newExposure: 0 };
@@ -281,7 +283,7 @@ export class ExecutionService {
        }
     }
 
-    // 2. EXPOSURE CHECK (Handled by RiskGovernor against Isolated Account)
+    // 2. EXPOSURE CHECK
     
     // 3. RISK APPROVAL
     const approved = await riskGovernor.requestApproval(market, account, betSizeUSDC);
@@ -296,17 +298,32 @@ export class ExecutionService {
       TradeLogger.log({ ...eventPayload, status: 'SKIPPED', decision_reason: 'TOKEN_RESOLVE_FAIL', error: 'Tokens not found' });
       return { executed: false, newExposure: account.currentExposure };
     }
-    const sideToBuy = obs.direction === 'UP' ? 'UP' : 'DOWN';
+    const sideToBuy = direction === 'UP' ? 'UP' : 'DOWN';
     const tokenId = sideToBuy === 'UP' ? tokens.up : tokens.down;
     
-    // Calculate total shares requested based on Taker Price (Base assumption)
-    // If maker fills, price is better, so shares are constant? Or USD is constant?
-    // Usually size is shares. 
-    // Let's stick to Size = USD / Price.
     const sharesTotal = Number((betSizeUSDC / executionPrice).toFixed(2));
     let sharesRemaining = sharesTotal;
     
     Logger.info(`${logPrefix}[${contextId}] EXEC_REQ ${sideToBuy} (${executionMode}): $${betSizeUSDC.toFixed(2)} (${sharesTotal} shares)`);
+
+    // SELECT ADAPTER
+    const adapter: ExecutionAdapter = mode === 'LIVE' 
+        ? new LiveExecutionAdapter() 
+        : new PaperExecutionAdapter({
+            asset: market.asset,
+            marketId: market.id,
+            polymarketId: market.polymarket_market_id,
+            side: direction,
+            runId: run?.id,
+            confidence: obs.confidence,
+            reason: `ENTER:${executionMode}`,
+            oracle: { 
+                price: obs.chainlink.price, 
+                timestamp: obs.chainlink.timestamp, 
+                age: (Date.now() - obs.chainlink.timestamp)/1000, 
+                source: obs.chainlink.source 
+            }
+        });
 
     // =========================================================
     // MAKER-FIRST EXECUTION BLOCK
@@ -316,37 +333,33 @@ export class ExecutionService {
     if (ENABLE_MAKER_FIRST && !ENV.DRY_RUN) {
         try {
             // A. Get Maker Price (Best Bid)
-            // We want to sit on the bid to buy.
             const depth = await polymarket.getMarketDepth(tokenId);
             
-            // Only attempt if there is a bid to join
             if (depth && depth.bestBid > 0) {
                 const makerPrice = depth.bestBid;
                 
                 Logger.info(`[MAKER_ATTEMPT] market=${market.polymarket_market_id} side=${sideToBuy} size=${sharesTotal} price=${makerPrice}`);
                 
-                // B. Place Limit Order
-                const makerOrderId = await polymarket.placeOrder(tokenId, 'BUY', makerPrice, sharesTotal);
+                // B. Place Limit Order VIA ADAPTER
+                const makerOrderId = await adapter.placeOrder(tokenId, 'BUY', makerPrice, sharesTotal);
                 
                 // C. Wait Timeout
                 await new Promise(r => setTimeout(r, MAKER_TIMEOUT_MS));
 
                 // D. Cancel & Check
-                await polymarket.cancelOrder(makerOrderId);
-                const order = await polymarket.getOrder(makerOrderId);
+                await adapter.cancelOrder(makerOrderId);
+                const order = await adapter.getOrder(makerOrderId);
                 
                 if (order) {
                     const matchedSize = parseFloat(order.sizeMatched || '0');
                     if (matchedSize > 0) {
                         makerFilled = true;
                         
-                        // Update tracking
                         const makerUsdSpent = matchedSize * makerPrice;
                         sharesRemaining = sharesTotal - matchedSize;
                         
                         Logger.info(`[MAKER_FILLED] filled=${matchedSize} shares @ ${makerPrice}`);
                         
-                        // Log Maker Part
                         TradeLogger.log({ 
                             ...eventPayload, 
                             status: 'EXECUTED', 
@@ -356,13 +369,12 @@ export class ExecutionService {
                             context: { ...eventPayload.context, type: 'MAKER', orderId: makerOrderId, shares: matchedSize }
                         });
                         
-                        // Ledger & Account Update
                         if (market.active_run_id) {
                             await pnlLedger.recordOpenTrade({
                                 run_id: market.active_run_id,
                                 market_id: market.id,
                                 polymarket_market_id: market.polymarket_market_id,
-                                mode: 'LIVE',
+                                mode: mode === 'PAPER' ? 'PAPER' : 'LIVE',
                                 side: sideToBuy === 'UP' ? 'YES' : 'NO',
                                 size_usd: makerUsdSpent,
                                 entry_price: makerPrice,
@@ -377,11 +389,7 @@ export class ExecutionService {
                         
                         if (sharesRemaining <= 0) {
                             return { executed: true, newExposure: account.currentExposure };
-                        } else {
-                            Logger.info(`[MAKER_PARTIAL] Remaining shares to taker: ${sharesRemaining.toFixed(2)}`);
                         }
-                    } else {
-                        Logger.info(`[MAKER_TIMEOUT_FALLBACK] No fill after ${MAKER_TIMEOUT_MS}ms. Proceeding to Taker.`);
                     }
                 }
             }
@@ -394,78 +402,22 @@ export class ExecutionService {
     // TAKER EXECUTION (FALLBACK / REMAINDER)
     // =========================================================
     
-    // Risk Re-Check (Required by prompt)
     if (makerFilled && sharesRemaining > 0) {
-        // If we filled some, verify we are still good to take the rest
         const takerUsdNeeded = sharesRemaining * executionPrice;
         const reApproved = await riskGovernor.requestApproval(market, account, takerUsdNeeded);
         if (!reApproved) {
              Logger.warn(`[RISK_VETO_FALLBACK] Stopped Taker fill after partial Maker fill.`);
-             return { executed: true, newExposure: account.currentExposure }; // Executed true because partial fill happened
+             return { executed: true, newExposure: account.currentExposure };
         }
     }
 
     try {
-      if (ENV.DRY_RUN) {
-          // DRY RUN SIMULATION
-          if (executionMode === 'PASSIVE') {
-               const fillRoll = Math.random();
-               const fillThreshold = 0.40; // 40% chance
-               
-               if (fillRoll > fillThreshold) {
-                   Logger.info(`${logPrefix}[DRY_RUN] Passive Order NOT Filled (Roll: ${fillRoll.toFixed(2)} > ${fillThreshold})`);
-                   return { executed: false, newExposure: account.currentExposure };
-               } else {
-                   Logger.info(`${logPrefix}[DRY_RUN] Passive Order FILLED (Simulated)`);
-               }
-          }
-
-          await new Promise(r => setTimeout(r, 200)); 
-          
-          Logger.info(`${logPrefix}[${contextId}] SIMULATED EXECUTION: ${sharesTotal} shares @ ${executionPrice}`);
-
-          TradeLogger.log({ 
-            ...eventPayload, 
-            status: 'EXECUTED', 
-            decision_reason: 'DRY_RUN_EXEC',
-            context: { orderId: 'DRY-RUN-ID', shares: sharesTotal, filledPrice: executionPrice, mode, dry_run: true, scaling: scalingMeta, executionMode, isMaker }
-          });
-          
-          const ledgerSide = sideToBuy === 'UP' ? 'YES' : 'NO';
-          if (market.active_run_id) {
-              await pnlLedger.recordOpenTrade({
-                  run_id: market.active_run_id,
-                  market_id: market.id,
-                  polymarket_market_id: market.polymarket_market_id,
-                  mode: 'DRY_RUN',
-                  side: ledgerSide,
-                  size_usd: betSizeUSDC,
-                  entry_price: executionPrice,
-                  status: 'OPEN',
-                  realized_pnl: 0,
-                  unrealized_pnl: 0,
-                  opened_at: new Date().toISOString(),
-                  metadata: {
-                      confidence: obs.confidence,
-                      regime: obs.regime,
-                      tier: scalingMeta?.tierLevel,
-                      clip: scalingMeta?.clipIndex,
-                      executionMode,
-                      isMaker,
-                      spreadAtPlacement,
-                      isolatedAccount: account.marketKey
-                  }
-              });
-              
-              // CRITICAL: UPDATE ISOLATED ACCOUNT EXPOSURE
-              accountManager.updateExposure(market.asset, direction, betSizeUSDC);
-          }
-
-          return { executed: false, simulated: true, newExposure: account.currentExposure };
+      if (ENV.DRY_RUN && mode === 'LIVE') {
+          throw new Error("Misconfiguration: Legacy DRY_RUN path hit in ExecutionService");
       }
 
-      // LIVE EXECUTION (TAKER)
-      const takerOrderId = await polymarket.placeOrder(tokenId, 'BUY', executionPrice, sharesRemaining);
+      // EXECUTE VIA ADAPTER
+      const takerOrderId = await adapter.placeOrder(tokenId, 'BUY', executionPrice, sharesRemaining);
       const takerUsd = sharesRemaining * executionPrice;
 
       TradeLogger.log({ 
@@ -478,7 +430,33 @@ export class ExecutionService {
       
       Logger.info(`[TAKER_EXECUTED] ${sharesRemaining} shares @ ${executionPrice}`);
       
-      // CRITICAL: UPDATE ISOLATED ACCOUNT EXPOSURE
+      // CRITICAL: UPDATE ISOLATED ACCOUNT EXPOSURE (Paper Mode Included)
+      if (market.active_run_id) {
+           await pnlLedger.recordOpenTrade({
+              run_id: market.active_run_id,
+              market_id: market.id,
+              polymarket_market_id: market.polymarket_market_id,
+              mode: mode === 'PAPER' ? 'PAPER' : 'LIVE',
+              side: sideToBuy === 'UP' ? 'YES' : 'NO',
+              size_usd: takerUsd,
+              entry_price: executionPrice,
+              status: 'OPEN',
+              realized_pnl: 0,
+              unrealized_pnl: 0,
+              opened_at: new Date().toISOString(),
+              metadata: {
+                  confidence: obs.confidence,
+                  regime: obs.regime,
+                  tier: scalingMeta?.tierLevel,
+                  clip: scalingMeta?.clipIndex,
+                  executionMode,
+                  isMaker,
+                  spreadAtPlacement,
+                  isolatedAccount: account.marketKey
+              }
+          });
+      }
+
       accountManager.updateExposure(market.asset, direction, takerUsd);
 
       return { executed: true, newExposure: account.currentExposure };

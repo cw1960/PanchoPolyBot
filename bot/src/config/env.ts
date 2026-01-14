@@ -1,6 +1,7 @@
 
 import dotenv from 'dotenv';
 import { Logger } from '../utils/logger';
+import { EXECUTION_MODE } from './executionMode';
 
 dotenv.config();
 
@@ -16,6 +17,7 @@ export const ENV = {
   
   // Safety: Dry Run Mode
   DRY_RUN: DRY_RUN,
+  EXECUTION_MODE: EXECUTION_MODE,
 
   // Trading Credentials
   PRIVATE_KEY: process.env.PRIVATE_KEY || '',
@@ -37,11 +39,20 @@ export function validateEnv() {
   if (!ENV.SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
   if (!ENV.PRIVATE_KEY) missing.push("PRIVATE_KEY");
   
-  // API keys are only strictly required if we are NOT in dry run mode.
+  // API keys are only strictly required if we are NOT in legacy dry run mode.
   if (!ENV.DRY_RUN) {
     if (!ENV.POLY_API_KEY) missing.push("POLY_API_KEY");
     if (!ENV.POLY_API_SECRET) missing.push("POLY_API_SECRET");
     if (!ENV.POLY_PASSPHRASE) missing.push("POLY_PASSPHRASE");
+  }
+
+  // VALIDATE PAPER MODE CONFIGURATION
+  // PAPER mode implies Real Oracles + Fake Execution.
+  // DRY_RUN=true means Fake Oracles.
+  // Therefore, PAPER mode REQUIRES DRY_RUN=false.
+  if (ENV.EXECUTION_MODE === 'PAPER' && ENV.DRY_RUN) {
+     Logger.error("INVALID CONFIG: EXECUTION_MODE='PAPER' requires DRY_RUN='false' to use real oracles.");
+     (process as any).exit(1);
   }
 
   if (missing.length > 0) {
@@ -50,7 +61,9 @@ export function validateEnv() {
   }
 
   if (ENV.DRY_RUN) {
-    Logger.warn("!!! RUNNING IN DRY_RUN MODE - NO REAL TRADES WILL BE EXECUTED !!!");
+    Logger.warn("!!! RUNNING IN LEGACY DRY_RUN MODE - MOCK ORACLES ACTIVE !!!");
+  } else {
+    Logger.info(`[ENV] REAL ORACLES ACTIVE. Execution Mode: ${ENV.EXECUTION_MODE}`);
   }
 
   if (!ENV.API_KEY) {

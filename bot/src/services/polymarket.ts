@@ -4,6 +4,7 @@ import { ClobClient, Side } from '@polymarket/clob-client';
 import { ENV } from '../config/env';
 import { Logger } from '../utils/logger';
 import axios from 'axios';
+import { EXECUTION_MODE } from '../config/executionMode';
 
 class PolymarketService {
   private client: ClobClient | null = null;
@@ -234,6 +235,10 @@ class PolymarketService {
    * Executes a Limit Order (GTC)
    */
   public async placeOrder(tokenId: string, side: 'BUY' | 'SELL', price: number, size: number) {
+    if (EXECUTION_MODE !== 'LIVE') {
+        throw new Error(`[EXECUTION_FATAL] Attempted on-chain execution in ${EXECUTION_MODE} mode.`);
+    }
+
     if (!this.client) throw new Error("Client not initialized");
 
     const order = await this.client.createOrder({
@@ -253,6 +258,10 @@ class PolymarketService {
    * Cancels a specific order by ID.
    */
   public async cancelOrder(orderId: string) {
+    if (EXECUTION_MODE !== 'LIVE') {
+         throw new Error(`[EXECUTION_FATAL] Attempted on-chain cancel in ${EXECUTION_MODE} mode.`);
+    }
+
     if (!this.client) return;
     try {
       await this.client.cancelOrder({ orderID: orderId });

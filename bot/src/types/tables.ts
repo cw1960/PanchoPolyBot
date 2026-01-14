@@ -80,7 +80,7 @@ export interface TradeLedgerRow {
   run_id: string;
   market_id: string;
   polymarket_market_id: string;
-  mode: 'DRY_RUN' | 'LIVE';
+  mode: 'DRY_RUN' | 'LIVE' | 'PAPER';
   side: 'YES' | 'NO';
   size_usd: number;
   entry_price: number;
