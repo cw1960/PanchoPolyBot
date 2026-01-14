@@ -13,7 +13,7 @@ import { Asset } from '../types/assets';
  * THROWS on unknown or ambiguous slugs.
  */
 export function assetFromMarketSlug(slug: string): Asset {
-    if (!slug) throw new Error("[ASSET_DERIVATION] Slug is empty or undefined");
+    if (!slug) throw new Error("[ORACLE_FATAL] Slug is empty or undefined");
     
     const s = slug.toLowerCase().trim();
     
@@ -22,5 +22,5 @@ export function assetFromMarketSlug(slug: string): Asset {
     if (s.startsWith('sol-')) return Asset.SOL;
     if (s.startsWith('xrp-')) return Asset.XRP;
     
-    throw new Error(`[ASSET_DERIVATION] FAILED: Unknown asset for slug '${slug}'. Logic requires btc-, eth-, sol-, or xrp- prefix.`);
+    throw new Error(`[ORACLE_FATAL] FAILED: Unknown asset for slug '${slug}'. Logic requires btc-, eth-, sol-, or xrp- prefix.`);
 }
