@@ -7,7 +7,7 @@ if (process.env.DRY_RUN !== 'false') {
 
 import { ethers } from 'ethers';
 import { Asset } from '../types/assets';
-import { CHAINLINK_FEEDS } from '../oracles/chainlinkFeeds';
+import { getChainlinkFeedAddress, assertAllowedFeedAddress } from '../oracles/chainlinkFeeds';
 import { Logger } from '../utils/logger';
 
 const AGGREGATOR_ABI = [
@@ -31,21 +31,19 @@ export class ChainlinkService {
    * STRICTLY FORBIDS arbitrary addresses.
    */
   public async getLatestPrice(asset: Asset): Promise<{ price: number; timestamp: number }> {
-    const feed = CHAINLINK_FEEDS[asset];
+    // 1. Resolve strictly via helper (Throws if asset unknown)
+    const feed = getChainlinkFeedAddress(asset);
 
-    // 1. FAIL FAST: Check Existence in Whitelist
-    if (!feed) {
-      const msg = `[ORACLE_FATAL] No Chainlink feed for asset ${asset}`;
-      Logger.error(msg);
-      throw new Error(msg);
+    // 2. FAIL FAST: Runtime Address Validation (Regex)
+    if (!/^0x[a-fA-F0-9]{40}$/.test(feed)) {
+       throw new Error(`[ORACLE_FATAL] Invalid feed address format for asset=${asset}: ${feed}`);
     }
 
-    // 2. FAIL FAST: Runtime Address Validation
-    if (feed.length !== 42) {
-       throw new Error(`[ORACLE_FATAL] Invalid feed address for ${asset}: ${feed}`);
-    }
+    // 3. FAIL FAST: Whitelist Assertion
+    assertAllowedFeedAddress(feed);
 
     try {
+      // 4. Construct Contract (Only reachable if strictly validated)
       const contract = new ethers.Contract(feed, AGGREGATOR_ABI, this.provider);
       
       // Parallel fetch for speed
@@ -57,16 +55,16 @@ export class ChainlinkService {
       const price = Number(ethers.formatUnits(roundData.answer, decimals));
       const timestamp = Number(roundData.updatedAt) * 1000;
 
-      // 3. Log ONCE per market (Asset)
+      // 5. Log ONCE per market (Asset)
       if (!ChainlinkService.loggedFeeds.has(asset)) {
-          Logger.info(`[ORACLE_OK] ${asset} -> ${feed}`);
+          Logger.info(`[ORACLE] Using Chainlink feed for asset=${asset} address=${feed}`);
           ChainlinkService.loggedFeeds.add(asset);
       }
 
       return { price, timestamp };
 
     } catch (err: any) {
-      Logger.error(`[ORACLE_FATAL] Attempted to use non-Chainlink contract as oracle for ${asset}`, err);
+      Logger.error(`[ORACLE_FATAL] Chainlink call failed for ${asset} at ${feed}`, err);
       throw err;
     }
   }

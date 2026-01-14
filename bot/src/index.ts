@@ -7,6 +7,7 @@ import { HeartbeatService } from './services/heartbeat';
 import { AnalysisLoop } from './loops/analysisLoop';
 import { logEvent } from './services/supabase';
 import { Logger } from './utils/logger';
+import { validateOracleRegistry } from './oracles/chainlinkFeeds';
 
 async function main() {
   Logger.info(`[BOOT] DRY_RUN=${ENV.DRY_RUN}`);
@@ -14,21 +15,24 @@ async function main() {
 
   // 1. Validate Config
   validateEnv();
+  
+  // 2. Validate Oracle Registry (Fail Fast)
+  validateOracleRegistry();
 
-  // 2. Initialize Services
+  // 3. Initialize Services
   const registry = new MarketRegistry();
   const controlLoop = new ControlLoop(registry);
   const heartbeat = new HeartbeatService();
   const analysisLoop = new AnalysisLoop();
 
-  // 3. Start Lifecycle
+  // 4. Start Lifecycle
   await logEvent('INFO', 'VPS Process Started');
   
   heartbeat.start(() => registry.getActiveCount());
   await controlLoop.start();
   await analysisLoop.start();
 
-  // 4. Handle Shutdown Gracefully
+  // 5. Handle Shutdown Gracefully
   const shutdown = async () => {
     Logger.info("Shutting down...");
     await logEvent('WARN', 'VPS Process Stopping...');

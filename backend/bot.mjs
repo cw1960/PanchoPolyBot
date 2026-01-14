@@ -325,6 +325,7 @@ function startTrading() {
     if (binanceWs) return;
 
     console.log(chalk.blue(`> Connecting to Binance Stream (${CONFIG.binanceSymbol})...`));
+    // @ts-ignore
     binanceWs = new WebSocket(`wss://stream.binance.com:9443/ws/${CONFIG.binanceSymbol}@trade`);
     
     binanceWs.on('open', () => {
