@@ -5,65 +5,68 @@ if (process.env.DRY_RUN !== 'false') {
   throw new Error('FATAL: ChainlinkService loaded while DRY_RUN=true. This is a bug. Consumers must use Mocks.');
 }
 
-import axios from 'axios';
-import { Logger } from '../utils/logger';
+import { ethers } from 'ethers';
 import { Asset } from '../types/assets';
+import { CHAINLINK_FEEDS } from '../oracles/chainlinkFeeds';
+import { Logger } from '../utils/logger';
 
-// STRICT MAPPING - NO DEFAULTS
-// Polygon Mainnet Aggregator Addresses
-const CHAINLINK_FEEDS: Record<Asset, string> = {
-  [Asset.BTC]: '0xc907E116054Ad103354f2D350FD2514433D57F6f', 
-  [Asset.ETH]: '0xF9680D99D6C9589e2a93a78A04A279771948a025',
-  [Asset.SOL]: '0x1092a6C1704e578494c259837905D4157a667618',
-  [Asset.XRP]: '0x1C13E171969B0A3F1F17d3550889e4726279930D'
-};
+const AGGREGATOR_ABI = [
+  "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
+  "function decimals() view returns (uint8)"
+];
 
-// Public read-only API for Chainlink Feeds (mirrors on-chain data)
-const BASE_URL = 'https://data.chain.link/api/v1/feeds';
+// Use provided RPC or fallback to public Polygon RPC
+const RPC_URL = process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com';
 
 export class ChainlinkService {
-  
+  private provider: ethers.JsonRpcProvider;
+  private static loggedFeeds = new Set<string>();
+
+  constructor() {
+    this.provider = new ethers.JsonRpcProvider(RPC_URL);
+  }
+
   /**
-   * Fetches the latest price from the Chainlink feed.
+   * Fetches the latest price from a whitelisted Chainlink Aggregator.
+   * STRICTLY FORBIDS arbitrary addresses.
    */
-  public async getLatestPrice(asset: Asset, marketSlug: string): Promise<{ price: number; timestamp: number } | null> {
-    
-    // 1. Validate Feed Address existence
-    const address = CHAINLINK_FEEDS[asset]; 
+  public async getLatestPrice(asset: Asset): Promise<{ price: number; timestamp: number }> {
+    const feed = CHAINLINK_FEEDS[asset];
 
-    // 2. REQUIRED LOG (Diagnostic)
-    console.log(`[ORACLE_CALL] slug=${marketSlug} asset=${asset} feed=${address || 'UNDEFINED'}`);
+    // 1. FAIL FAST: Check Existence in Whitelist
+    if (!feed) {
+      const msg = `[ORACLE_FATAL] No Chainlink feed for asset ${asset}`;
+      Logger.error(msg);
+      throw new Error(msg);
+    }
 
-    // 3. FAIL FAST (No Defaults)
-    if (!address) {
-      const errorMsg = `[CHAINLINK_FATAL] No feed configured for asset '${asset}' (Slug: ${marketSlug}). Aborting.`;
-      Logger.error(errorMsg);
-      throw new Error(errorMsg);
+    // 2. FAIL FAST: Runtime Address Validation
+    if (feed.length !== 42) {
+       throw new Error(`[ORACLE_FATAL] Invalid feed address for ${asset}: ${feed}`);
     }
 
     try {
-      // Fetch latest round data from Chainlink public API
-      const url = `${BASE_URL}/polygon-mainnet/${address}`;
+      const contract = new ethers.Contract(feed, AGGREGATOR_ABI, this.provider);
       
-      const response = await axios.get(url, { timeout: 3000 });
-      
-      if (!response.data || !response.data.answer) {
-        throw new Error("Invalid API response structure");
+      // Parallel fetch for speed
+      const [roundData, decimals] = await Promise.all([
+        contract.latestRoundData(),
+        contract.decimals()
+      ]);
+
+      const price = Number(ethers.formatUnits(roundData.answer, decimals));
+      const timestamp = Number(roundData.updatedAt) * 1000;
+
+      // 3. Log ONCE per market (Asset)
+      if (!ChainlinkService.loggedFeeds.has(asset)) {
+          Logger.info(`[ORACLE_OK] ${asset} -> ${feed}`);
+          ChainlinkService.loggedFeeds.add(asset);
       }
-
-      // 4. Parse Price
-      const rawPrice = BigInt(response.data.answer);
-      const decimals = 8; 
-      const price = Number(rawPrice) / Math.pow(10, decimals);
-
-      // 5. Parse Timestamp
-      const rawTimestamp = response.data.updatedAt || response.data.timestamp;
-      const timestamp = Number(rawTimestamp) * 1000; 
 
       return { price, timestamp };
 
     } catch (err: any) {
-      Logger.error(`Chainlink REST fetch failed for ${asset}`, err.message);
+      Logger.error(`[ORACLE_FATAL] Attempted to use non-Chainlink contract as oracle for ${asset}`, err);
       throw err;
     }
   }

@@ -1,4 +1,3 @@
-
 import { Market } from '../types/tables';
 import { MarketObservation } from '../types/marketEdge';
 import { Logger } from '../utils/logger';
@@ -12,9 +11,13 @@ import { ENV } from '../config/env';
 import type { ChainlinkService as ChainlinkServiceType } from './chainlink';
 import type { SpotPriceService as SpotPriceServiceType } from './spotPrices';
 
+// Fix for missing types for 'require' in Node environment
+declare const require: any;
+
 // --- MOCK IMPLEMENTATIONS (For DRY_RUN) ---
 class MockChainlinkService {
-  public async getLatestPrice(asset: Asset, marketSlug: string): Promise<{ price: number; timestamp: number } | null> {
+  // Updated signature to match Real Service (Asset only)
+  public async getLatestPrice(asset: Asset): Promise<{ price: number; timestamp: number } | null> {
       Logger.info(`[DRY_RUN_MOCK] Chainlink fetch for ${asset}`);
       let mockPrice = 45000;
       if (asset === Asset.ETH) mockPrice = 2500;
@@ -191,7 +194,8 @@ export class EdgeEngine {
     let clData, spotPrice;
     try {
       [clData, spotPrice] = await Promise.all([
-        this.chainlink.getLatestPrice(asset, market.polymarket_market_id),
+        // UPDATED: No longer passing market slug, STRICT asset-only call
+        this.chainlink.getLatestPrice(asset),
         this.spot.getSpotPrice(asset)
       ]);
     } catch (err: any) {
@@ -261,9 +265,6 @@ export class EdgeEngine {
     let impliedProbability = 0;
     let orderBookSnapshot = undefined;
     
-    // Polymarket fetch is safe in DRY_RUN as it's just HTTP GET (read-only)
-    // but typically we might want to mock this too if strict offline.
-    // Assuming polymarket.ts handles its own safety or is allowed (API read-only).
     const tokens = await polymarket.getTokens(market.polymarket_market_id);
     if (tokens) {
         const tokenId = direction === 'UP' ? tokens.up : tokens.down;
