@@ -18,6 +18,14 @@ const AGGREGATOR_ABI = [
 // Use provided RPC or fallback to public Polygon RPC
 const RPC_URL = process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com';
 
+// 4️⃣ Staleness (heartbeat enforcement)
+const MAX_STALENESS_SECONDS: Record<Asset, number> = {
+  [Asset.BTC]: 120,
+  [Asset.ETH]: 120,
+  [Asset.SOL]: 180,
+  [Asset.XRP]: 180
+};
+
 export class ChainlinkService {
   private provider: ethers.JsonRpcProvider;
   private static loggedFeeds = new Set<string>();
@@ -29,6 +37,7 @@ export class ChainlinkService {
   /**
    * Fetches the latest price from a whitelisted Chainlink Aggregator.
    * STRICTLY FORBIDS arbitrary addresses.
+   * STRICTLY VALIDATES return data.
    */
   public async getLatestPrice(asset: Asset): Promise<{ price: number; timestamp: number }> {
     // 1. Resolve strictly via helper (Throws if asset unknown)
@@ -52,12 +61,16 @@ export class ChainlinkService {
         contract.decimals()
       ]);
 
+      // 5. STRICT DATA VALIDATION
+      this.validateRoundData(asset, roundData);
+
       const price = Number(ethers.formatUnits(roundData.answer, decimals));
       const timestamp = Number(roundData.updatedAt) * 1000;
 
-      // 5. Log ONCE per market (Asset)
+      // 6. Log ONCE per market (Asset) on first SUCCESSFUL validation
       if (!ChainlinkService.loggedFeeds.has(asset)) {
-          Logger.info(`[ORACLE] Using Chainlink feed for asset=${asset} address=${feed}`);
+          const ageSec = Math.floor(Date.now() / 1000) - Number(roundData.updatedAt);
+          Logger.info(`[ORACLE] Valid Chainlink price asset=${asset} updatedAt=${timestamp} age=${ageSec}s`);
           ChainlinkService.loggedFeeds.add(asset);
       }
 
@@ -66,6 +79,42 @@ export class ChainlinkService {
     } catch (err: any) {
       Logger.error(`[ORACLE_FATAL] Chainlink call failed for ${asset} at ${feed}`, err);
       throw err;
+    }
+  }
+
+  /**
+   * Enforces mandatory Chainlink data integrity checks.
+   * Throws [ORACLE_FATAL] on any violation.
+   */
+  private validateRoundData(asset: Asset, roundData: any): void {
+    const roundId = BigInt(roundData.roundId);
+    const answer = BigInt(roundData.answer);
+    const updatedAt = BigInt(roundData.updatedAt);
+    const answeredInRound = BigInt(roundData.answeredInRound);
+
+    // 1. Round completeness
+    if (answeredInRound < roundId) {
+        throw new Error(`[ORACLE_FATAL] Incomplete Chainlink round for asset=${asset}: answeredInRound < roundId`);
+    }
+
+    // 2. Price sanity
+    if (answer <= 0n) {
+        throw new Error(`[ORACLE_FATAL] Invalid Chainlink price for asset=${asset}: answer=${answer}`);
+    }
+
+    // 3. Timestamp presence
+    if (updatedAt === 0n) {
+        throw new Error(`[ORACLE_FATAL] Chainlink updatedAt missing for asset=${asset}`);
+    }
+
+    // 4. Staleness
+    const nowSec = Math.floor(Date.now() / 1000);
+    const updatedSec = Number(updatedAt);
+    const ageSec = nowSec - updatedSec;
+    const maxStaleness = MAX_STALENESS_SECONDS[asset];
+
+    if (ageSec > maxStaleness) {
+        throw new Error(`[ORACLE_FATAL] Stale Chainlink price for asset=${asset}: age=${ageSec}s exceeds max=${maxStaleness}s`);
     }
   }
 }
