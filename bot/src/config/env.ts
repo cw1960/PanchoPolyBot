@@ -38,56 +38,39 @@ export const ENV = {
 export function validateEnv() {
   const missing: string[] = [];
 
-  // 1. Common Requirements
-  if (!ENV.SUPABASE_URL) missing.push("SUPABASE_URL");
-  if (!ENV.SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
-  
-  // 2. LIVE Mode Validation (Strict Credentials)
-  if (ENV.EXECUTION_MODE === 'LIVE') {
-    if (!ENV.PRIVATE_KEY) missing.push("PRIVATE_KEY");
-    if (!ENV.POLY_API_KEY) missing.push("POLY_API_KEY");
-    if (!ENV.POLY_API_SECRET) missing.push("POLY_API_SECRET");
-    if (!ENV.POLY_PASSPHRASE) missing.push("POLY_PASSPHRASE");
-  } 
-  
-  // 3. PAPER Mode Validation (No Credentials, Real Oracles)
-  if (ENV.EXECUTION_MODE === 'PAPER') {
-     // Warn if credentials are accidentally present (Safety Check)
-     if (ENV.PRIVATE_KEY || ENV.POLY_API_KEY || ENV.POLY_API_SECRET || ENV.POLY_PASSPHRASE) {
-         Logger.warn("[CONFIG_WARN] Trading credentials present but EXECUTION_MODE=PAPER — execution is disabled");
-     }
+  const executionMode =
+    process.env.EXECUTION_MODE === 'LIVE' ? 'LIVE' : 'PAPER';
 
-     // Enforce Real Oracles (Safety)
-     if (ENV.DRY_RUN) {
-         Logger.error("[CONFIG_FATAL] PAPER mode requires DRY_RUN=false (real oracles).");
-         (process as any).exit(1);
-     }
+  // ---- Always required ----
+  if (!ENV.SUPABASE_URL) missing.push('SUPABASE_URL');
+  if (!ENV.SUPABASE_SERVICE_ROLE_KEY)
+    missing.push('SUPABASE_SERVICE_ROLE_KEY');
+
+  // ---- Required only in LIVE mode ----
+  if (executionMode === 'LIVE') {
+    if (!ENV.PRIVATE_KEY) missing.push('PRIVATE_KEY');
+    if (!ENV.POLY_API_KEY) missing.push('POLY_API_KEY');
+    if (!ENV.POLY_API_SECRET) missing.push('POLY_API_SECRET');
+    if (!ENV.POLY_PASSPHRASE) missing.push('POLY_PASSPHRASE');
   }
 
-  // 4. Fail on missing requirements
   if (missing.length > 0) {
-    Logger.error(`[CONFIG_FATAL] Missing required ENV variables for ${ENV.EXECUTION_MODE} mode: ${missing.join(', ')}`);
-    (process as any).exit(1);
+    throw new Error(
+      `[CONFIG_FATAL] Missing required ENV variables for ${executionMode} mode: ${missing.join(
+        ', '
+      )}`
+    );
   }
 
-  // 5. Status Logging
-  if (ENV.EXECUTION_MODE === 'LIVE') {
-      Logger.info("[MODE] EXECUTION_MODE=LIVE (real trading enabled)");
-  } else {
-      Logger.info("[MODE] EXECUTION_MODE=PAPER (execution disabled)");
+  if (executionMode === 'PAPER' && ENV.DRY_RUN !== false) {
+    throw new Error(
+      `[CONFIG_FATAL] PAPER mode requires DRY_RUN=false (real oracles)`
+    );
   }
 
-  if (ENV.DRY_RUN) {
-    Logger.warn("!!! RUNNING IN LEGACY DRY_RUN MODE - MOCK ORACLES ACTIVE !!!");
-  } else {
-    Logger.info(`[ENV] REAL ORACLES ACTIVE.`);
-  }
-
-  if (!ENV.API_KEY) {
-    Logger.warn("Missing API_KEY. AI Analysis features will be unavailable.");
-  }
-
-  if (ENV.AUTO_ROTATION) {
-    Logger.info(`[AUTO_ROTATION] ENABLED for assets: ${ENV.ROTATION_ASSETS.join(', ')}`);
-  }
+  console.log(
+    executionMode === 'LIVE'
+      ? '[MODE] EXECUTION_MODE=LIVE (real trading enabled)'
+      : '[MODE] EXECUTION_MODE=PAPER (execution disabled)'
+  );
 }
