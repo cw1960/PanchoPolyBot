@@ -35,35 +35,50 @@ export const ENV = {
 
 export function validateEnv() {
   const missing: string[] = [];
+
+  // Common Requirements (Supabase)
   if (!ENV.SUPABASE_URL) missing.push("SUPABASE_URL");
   if (!ENV.SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
-  if (!ENV.PRIVATE_KEY) missing.push("PRIVATE_KEY");
   
-  // API keys are only strictly required if we are NOT in legacy dry run mode.
-  if (!ENV.DRY_RUN) {
+  // 1. LIVE Mode Validation (Strict Credentials)
+  if (ENV.EXECUTION_MODE === 'LIVE') {
+    if (!ENV.PRIVATE_KEY) missing.push("PRIVATE_KEY");
     if (!ENV.POLY_API_KEY) missing.push("POLY_API_KEY");
     if (!ENV.POLY_API_SECRET) missing.push("POLY_API_SECRET");
     if (!ENV.POLY_PASSPHRASE) missing.push("POLY_PASSPHRASE");
   }
 
-  // VALIDATE PAPER MODE CONFIGURATION
-  // PAPER mode implies Real Oracles + Fake Execution.
-  // DRY_RUN=true means Fake Oracles.
-  // Therefore, PAPER mode REQUIRES DRY_RUN=false.
-  if (ENV.EXECUTION_MODE === 'PAPER' && ENV.DRY_RUN) {
-     Logger.error("INVALID CONFIG: EXECUTION_MODE='PAPER' requires DRY_RUN='false' to use real oracles.");
-     (process as any).exit(1);
+  // 2. PAPER Mode Validation (No Credentials, Real Oracles)
+  if (ENV.EXECUTION_MODE === 'PAPER') {
+     // Must use Real Oracles (DRY_RUN=false)
+     if (ENV.DRY_RUN) {
+         Logger.error("[CONFIG_FATAL] PAPER mode requires DRY_RUN=false (real oracles).");
+         (process as any).exit(1);
+     }
+
+     // Warn if credentials are accidentally present (Safety Check)
+     if (ENV.PRIVATE_KEY || ENV.POLY_API_KEY || ENV.POLY_API_SECRET || ENV.POLY_PASSPHRASE) {
+         Logger.warn("[CONFIG_WARN] Trading credentials present but EXECUTION_MODE=PAPER — execution is disabled");
+     }
   }
 
+  // Fail on missing requirements
   if (missing.length > 0) {
-    Logger.error(`Missing required ENV variables: ${missing.join(', ')}`);
+    Logger.error(`[CONFIG_FATAL] Missing required ENV variables for ${ENV.EXECUTION_MODE} mode: ${missing.join(', ')}`);
     (process as any).exit(1);
+  }
+
+  // 3. Status Logging
+  if (ENV.EXECUTION_MODE === 'LIVE') {
+      Logger.info("[MODE] EXECUTION_MODE=LIVE (real trading enabled)");
+  } else {
+      Logger.info("[MODE] EXECUTION_MODE=PAPER (execution disabled)");
   }
 
   if (ENV.DRY_RUN) {
     Logger.warn("!!! RUNNING IN LEGACY DRY_RUN MODE - MOCK ORACLES ACTIVE !!!");
   } else {
-    Logger.info(`[ENV] REAL ORACLES ACTIVE. Execution Mode: ${ENV.EXECUTION_MODE}`);
+    Logger.info(`[ENV] REAL ORACLES ACTIVE.`);
   }
 
   if (!ENV.API_KEY) {
