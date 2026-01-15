@@ -22,10 +22,11 @@ export async function ensureLiveBtc15mMarket(): Promise<void> {
     lastCheckTime = now;
 
     try {
+        Logger.info("[ROTATOR] Fetching active BTC 15m markets from Gamma...");
+
         // 1. Query Gamma Markets
         // We look for active, open markets matching the 15m pattern.
         // Using the 'markets' endpoint as requested, which returns individual market objects.
-        // We fetch a batch to ensure we catch the right one.
         const url = "https://gamma-api.polymarket.com/markets";
         const params = {
             active: true,
@@ -40,7 +41,7 @@ export async function ensureLiveBtc15mMarket(): Promise<void> {
         const { data } = await axios.get(url, { params, timeout: 5000 });
 
         if (!Array.isArray(data)) {
-            Logger.warn("[ROTATOR] Unexpected API response format");
+            Logger.warn("[ROTATOR] Unexpected API response format (not array)");
             return;
         }
 
@@ -66,6 +67,8 @@ export async function ensureLiveBtc15mMarket(): Promise<void> {
             return true;
         });
 
+        Logger.info(`[ROTATOR] Candidates found: ${candidates.length}`);
+
         if (candidates.length === 0) {
             Logger.warn("[ROTATOR] No active BTC 15m markets found.");
             return;
@@ -82,6 +85,8 @@ export async function ensureLiveBtc15mMarket(): Promise<void> {
         const targetSlug = target.slug;
         const targetExpiry = target.endDate;
 
+        Logger.info(`[ROTATOR] Selected live BTC market slug=${targetSlug} (Expires: ${targetExpiry})`);
+
         // 4. Upsert Target into Supabase
         // First, check if it exists to get ID
         const { data: existing } = await supabase
@@ -94,12 +99,15 @@ export async function ensureLiveBtc15mMarket(): Promise<void> {
 
         if (!targetId) {
             // Insert New Market
+            // We provide safe defaults for required fields
             const { data: inserted, error: insertError } = await supabase.from('markets').insert({
                 polymarket_market_id: targetSlug,
                 asset: 'BTC', // Derived asset
-                direction: 'UP', // Default placeholder
+                direction: 'UP', // Default placeholder (bot logic handles dual direction)
                 enabled: true,
                 max_exposure: 100, // Default safe exposure
+                min_price_delta: 5.0, // Default config
+                max_entry_price: 0.99, // Default config
                 t_open: target.startDate, // Gamma usually provides this
                 t_expiry: target.endDate,
                 baseline_price: 0 // Will be hydrated by EdgeEngine
@@ -110,16 +118,16 @@ export async function ensureLiveBtc15mMarket(): Promise<void> {
                 return;
             }
             targetId = inserted.id;
-            Logger.info(`[ROTATOR] Discovered & Inserted: ${targetSlug} (Expires: ${targetExpiry})`);
+            Logger.info(`[ROTATOR] Inserted new market record: ${targetId}`);
         } else {
-            // Enable Existing
+            // Enable Existing and update times
             await supabase.from('markets').update({
                 enabled: true,
-                t_expiry: targetExpiry
+                t_expiry: targetExpiry,
+                t_open: target.startDate
             }).eq('id', targetId);
             
-            // Log less frequently for existing updates, mostly just Debug level if we had one
-            // Logger.info(`[ROTATOR] Confirmed Active: ${targetSlug}`);
+            Logger.info(`[ROTATOR] Re-enabled existing market record: ${targetId}`);
         }
 
         // 5. Disable Others (Atomic Switch)
@@ -134,8 +142,7 @@ export async function ensureLiveBtc15mMarket(): Promise<void> {
             if (disableError) {
                 Logger.error("[ROTATOR] Failed to disable stale markets", disableError);
             } else {
-                // If we want to be noisy only on changes, we could check row count, 
-                // but standard operation implies we just ensure purity here.
+                Logger.info(`[ROTATOR] Disabled old BTC markets (if any). Active market is now ${targetSlug}`);
             }
         }
 
