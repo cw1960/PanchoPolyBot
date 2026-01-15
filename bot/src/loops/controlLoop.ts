@@ -1,9 +1,10 @@
+
 import { supabase, logEvent } from '../services/supabase';
 import { MarketRegistry } from '../services/marketRegistry';
 import { Logger } from '../utils/logger';
 import { ENV } from '../config/env';
-import { BotControl, Market, TestRun } from '../types/tables';
-import { marketRotator } from '../services/marketRotator';
+import { BotControl, Market } from '../types/tables';
+import { ensureLiveBtc15mMarket } from '../services/marketRotator';
 
 export class ControlLoop {
   private registry: MarketRegistry;
@@ -57,12 +58,16 @@ export class ControlLoop {
         return;
       }
 
-      // 3. RUNNING STATE: Enforce Single Active Market
+      // 3. RUNNING STATE
       if (desiredState === 'running') {
         
-        // A. Rotate/Ensure Active Market
-        // This function guarantees DB has exactly one enabled BTC market (the current one)
-        await marketRotator.ensureCurrentMarket();
+        // A. AUTOMATIC ROTATION / DISCOVERY
+        // This ensures the DB always has the current live 15m market enabled
+        try {
+            await ensureLiveBtc15mMarket();
+        } catch (e: any) {
+            Logger.warn(`[CONTROL] Rotation failed: ${e.message}`);
+        }
 
         // B. Fetch Enabled Market from DB
         const { data: marketsData, error: marketsError } = await supabase
@@ -84,7 +89,13 @@ export class ControlLoop {
             .single();
 
         if (!globalRun) {
-            Logger.warn("Global Config Run not found. Waiting for initialization...");
+            // Auto-create if missing (Self-healing)
+            Logger.warn("Global Config Run missing. Creating default...");
+             await supabase.from('test_runs').insert({
+                 name: 'AUTO_TRADER_GLOBAL_CONFIG',
+                 status: 'RUNNING',
+                 params: { direction: 'BOTH', tradeSize: 10, maxExposure: 100 }
+             });
             return;
         }
 
