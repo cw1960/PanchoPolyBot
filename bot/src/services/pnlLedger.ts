@@ -87,7 +87,7 @@ export class PnLLedgerService {
 
     /**
      * Closes all OPEN positions for a market (Defensive Exit).
-     * INVARIANT #2: Single-Shot Capital Release via Atomic DB Update
+     * Now also records the historical Result.
      */
     public async closePosition(runId: string, marketId: string, reason: string, details: any) {
          
@@ -106,8 +106,8 @@ export class PnLLedgerService {
             })
             .eq('run_id', runId)
             .eq('market_id', marketId)
-            .eq('status', 'OPEN') // Predicate: Must be OPEN
-            .select();
+            .eq('status', 'OPEN')
+            .select('*, markets(*)');
 
          if (error) {
              Logger.error("[PNL_CLOSE] Atomic update failed", error);
@@ -115,11 +115,14 @@ export class PnLLedgerService {
          }
 
          if (!closedTrades || closedTrades.length === 0) {
-             Logger.info(`[CAPITAL_RELEASE_SKIPPED_ALREADY_SETTLED] Defensive Exit for ${marketId} found 0 OPEN trades.`);
+             Logger.info(`[CAPITAL_RELEASE_SKIPPED] Defensive Exit for ${marketId} found 0 OPEN trades.`);
              return;
          }
 
          Logger.info(`[PNL_CLOSE] Atomically closed ${closedTrades.length} trades.`);
+
+         let totalPnl = 0;
+         let totalVol = 0;
 
          for (const trade of closedTrades) {
              let exitPrice = trade.metadata?.last_mark_price || trade.entry_price; 
@@ -129,6 +132,9 @@ export class PnLLedgerService {
              const finalValue = shares * exitPrice;
              const realizedPnl = finalValue - trade.size_usd;
 
+             totalPnl += realizedPnl;
+             totalVol += trade.size_usd;
+
              // Update calculated PnL values on the now-closed rows
              await supabase.from('trade_ledger').update({
                  exit_price: exitPrice,
@@ -136,23 +142,33 @@ export class PnLLedgerService {
                  unrealized_pnl: 0,
              }).eq('id', trade.id);
             
-            // CRITICAL: UPDATE ISOLATED ACCOUNT PnL
+            // UPDATE ACCOUNT
             const asset = (trade as any).markets?.asset || trade.metadata?.asset || 'BTC'; 
             const direction = trade.side === 'YES' ? 'UP' : 'DOWN';
             
-            Logger.info(`[CAPITAL_RELEASED] ${asset}_${direction} | Released Exposure: $${trade.size_usd} | PnL: $${realizedPnl.toFixed(2)}`);
-
-            // 1. Update PnL & Bankroll
             accountManager.updatePnL(asset, direction, realizedPnl);
-            
-            // 2. Reduce Exposure (Free up the cost basis)
             accountManager.updateExposure(asset, direction, -trade.size_usd);
          }
+
+         // RECORD RESULT
+         const first = closedTrades[0];
+         await this.recordMarketResult(
+             runId, 
+             marketId, 
+             first.polymarket_market_id, 
+             (first as any).markets?.asset || 'BTC',
+             closedTrades.length,
+             totalVol,
+             totalPnl,
+             'DEFENSIVE_EXIT',
+             (first as any).markets?.t_open,
+             (first as any).markets?.t_expiry
+         );
     }
 
     /**
      * Settles all OPEN trades upon expiration.
-     * INVARIANT #2: Single-Shot Capital Release via Atomic DB Update
+     * Now also records the historical Result.
      */
     public async settleMarket(marketId: string, runId: string, finalPriceYes: number, source: string = 'UNKNOWN') {
         
@@ -169,8 +185,8 @@ export class PnLLedgerService {
             })
             .eq('run_id', runId)
             .eq('market_id', marketId)
-            .eq('status', 'OPEN') // Predicate: Must be OPEN
-            .select('*, markets(asset)'); // We need asset info
+            .eq('status', 'OPEN')
+            .select('*, markets(*)'); // We need asset info
 
         if (error) {
              Logger.error("[PNL_SETTLE] Atomic update failed", error);
@@ -178,11 +194,14 @@ export class PnLLedgerService {
         }
 
         if (!closedTrades || closedTrades.length === 0) {
-            Logger.info(`[CAPITAL_RELEASE_SKIPPED_ALREADY_SETTLED] Settlement for ${marketId} found 0 OPEN trades.`);
+            Logger.info(`[CAPITAL_RELEASE_SKIPPED] Settlement for ${marketId} found 0 OPEN trades.`);
             return;
         }
 
-        Logger.info(`[PNL_SETTLE] Closing ${closedTrades.length} trades. Market=${marketId} Price=${finalPriceYes.toFixed(3)} Source=${source}`);
+        Logger.info(`[PNL_SETTLE] Closing ${closedTrades.length} trades. Market=${marketId} Price=${finalPriceYes.toFixed(3)}`);
+
+        let totalPnl = 0;
+        let totalVol = 0;
 
         for (const trade of closedTrades) {
             let exitPrice = finalPriceYes;
@@ -193,6 +212,9 @@ export class PnLLedgerService {
             const shares = trade.size_usd / trade.entry_price;
             const finalValue = shares * exitPrice;
             const realizedPnl = finalValue - trade.size_usd;
+            
+            totalPnl += realizedPnl;
+            totalVol += trade.size_usd;
 
             // Finalize PnL
             await supabase
@@ -204,16 +226,65 @@ export class PnLLedgerService {
                 })
                 .eq('id', trade.id);
             
-            // CRITICAL: UPDATE ISOLATED ACCOUNT PnL
-            // Note: .select('*, markets(asset)') might return object structure. 
-            // Supabase returns joined data as properties.
             const asset = (trade as any).markets?.asset || trade.metadata?.asset || 'BTC'; 
             const direction = trade.side === 'YES' ? 'UP' : 'DOWN';
 
-            Logger.info(`[CAPITAL_RELEASED] ${asset}_${direction} | Released Exposure: $${trade.size_usd} | PnL: $${realizedPnl.toFixed(2)}`);
-
             accountManager.updatePnL(asset, direction, realizedPnl);
             accountManager.updateExposure(asset, direction, -trade.size_usd);
+        }
+
+        // RECORD RESULT
+        const first = closedTrades[0];
+        const winningOutcome = finalPriceYes === 1 ? 'UP' : 'DOWN';
+        await this.recordMarketResult(
+             runId, 
+             marketId, 
+             first.polymarket_market_id, 
+             (first as any).markets?.asset || 'BTC',
+             closedTrades.length,
+             totalVol,
+             totalPnl,
+             'EXPIRY',
+             (first as any).markets?.t_open,
+             (first as any).markets?.t_expiry,
+             winningOutcome
+         );
+    }
+
+    private async recordMarketResult(
+        runId: string,
+        marketId: string,
+        slug: string,
+        asset: string,
+        tradeCount: number,
+        volume: number,
+        pnl: number,
+        resolution: string,
+        start?: string,
+        end?: string,
+        outcome?: string
+    ) {
+        try {
+            const roi = volume > 0 ? (pnl / volume) * 100 : 0;
+            
+            await supabase.from('market_results').insert({
+                run_id: runId,
+                market_id: marketId,
+                polymarket_market_id: slug,
+                asset: asset,
+                market_start_time: start,
+                market_end_time: end || new Date().toISOString(),
+                total_trades: tradeCount,
+                total_volume_usd: volume,
+                gross_pnl: pnl, // Assuming net=gross for MVP (fees tracked separately usually)
+                net_pnl: pnl, 
+                roi_pct: roi,
+                resolution_source: resolution,
+                winning_outcome: outcome
+            });
+            Logger.info(`[RESULTS_RECORDED] ${slug} | PnL: $${pnl.toFixed(2)} | ROI: ${roi.toFixed(1)}%`);
+        } catch (e) {
+            Logger.error("[RESULTS] Failed to write history", e);
         }
     }
 }
