@@ -1,29 +1,23 @@
-
 import { supabase, logEvent } from '../services/supabase';
 import { MarketRegistry } from '../services/marketRegistry';
 import { Logger } from '../utils/logger';
 import { ENV } from '../config/env';
 import { BotControl, Market, TestRun } from '../types/tables';
-import { MarketRotator } from '../services/marketRotator';
-import { polymarket } from '../services/polymarket';
-import { marketResolver } from '../services/marketResolver';
+import { marketRotator } from '../services/marketRotator';
 
 export class ControlLoop {
   private registry: MarketRegistry;
-  private rotator: MarketRotator;
   private isRunning: boolean = false;
 
   constructor(registry: MarketRegistry) {
     this.registry = registry;
-    this.rotator = new MarketRotator();
   }
 
   public async start() {
     if (this.isRunning) return;
     this.isRunning = true;
-    Logger.info("Starting Control Loop...");
+    Logger.info("Starting Control Loop (Single-Market Autonomous Mode)...");
 
-    // Poll loop
     const poll = async () => {
       if (!this.isRunning) return;
       await this.tick();
@@ -39,9 +33,6 @@ export class ControlLoop {
 
   private async tick() {
     try {
-      // 0. Auto-Rotation Check (Runs independent of global stop, but respects config)
-      // Actually, if bot is globally stopped, we probably shouldn't rotate new markets in.
-      
       // 1. Fetch Global Control State
       const { data: controlData, error: controlError } = await supabase
         .from('bot_control')
@@ -56,22 +47,24 @@ export class ControlLoop {
 
       const desiredState = (controlData as BotControl).desired_state;
 
-      // 2. Logic Branch
+      // 2. STOPPED STATE
       if (desiredState === 'stopped') {
         if (this.registry.getActiveCount() > 0) {
           Logger.info("Command received: STOP. Shutting down markets.");
           await logEvent('WARN', 'Global Stop Command Received');
           this.registry.stopAll();
         }
-      } else if (desiredState === 'running') {
-        
-        // --- AUTO ROTATION INJECTION ---
-        await this.rotator.tick();
-        
-        // --- ORCHESTRATION INJECTION ---
-        await this.processLaunchRequests();
+        return;
+      }
 
-        // 3. Fetch Active Markets
+      // 3. RUNNING STATE: Enforce Single Active Market
+      if (desiredState === 'running') {
+        
+        // A. Rotate/Ensure Active Market
+        // This function guarantees DB has exactly one enabled BTC market (the current one)
+        await marketRotator.ensureCurrentMarket();
+
+        // B. Fetch Enabled Market from DB
         const { data: marketsData, error: marketsError } = await supabase
           .from('markets')
           .select('*')
@@ -81,141 +74,33 @@ export class ControlLoop {
           Logger.error("Failed to fetch markets", marketsError);
           return;
         }
-        
-        const markets = marketsData as Market[];
 
-        // 4. Fetch Active Experiment Configs (Test Runs)
-        const activeRunIds = markets
-            .map(m => m.active_run_id)
-            .filter((id): id is string => !!id); // Filter nulls and ensure type safety
-        
-        let runMap = new Map<string, TestRun>();
-        
-        if (activeRunIds.length > 0) {
-           const { data: runs, error: runsError } = await supabase
+        // C. Fetch The "Global" Configuration Run
+        // We now use a single persistent run config for the auto-bot
+        const { data: globalRun } = await supabase
             .from('test_runs')
             .select('*')
-            .in('id', activeRunIds);
-            
-           if (runsError) {
-             Logger.error("Failed to fetch test runs", runsError);
-           }
-           
-           if (runs) {
-              runs.forEach(r => runMap.set(r.id, r as TestRun));
-           }
+            .eq('name', 'AUTO_TRADER_GLOBAL_CONFIG')
+            .single();
+
+        if (!globalRun) {
+            Logger.warn("Global Config Run not found. Waiting for initialization...");
+            return;
         }
 
-        // 5. Enrich Market Objects with Run Data
-        const enrichedMarkets = markets.map(m => {
-            if (m.active_run_id) {
-                if (runMap.has(m.active_run_id)) {
-                    // Success: Found the run config
-                    return { ...m, _run: runMap.get(m.active_run_id) };
-                } else {
-                    // Warn: Market has run_id but run not found (deleted? error?)
-                    Logger.warn(`[CONTROL] Market ${m.asset} linked to missing Run ID: ${m.active_run_id}`);
-                }
-            }
-            return m;
-        });
+        // D. Hydrate Market with Global Config
+        const enrichedMarkets = marketsData.map(m => ({
+            ...m,
+            active_run_id: globalRun.id,
+            _run: globalRun
+        }));
 
-        // 6. Sync Registry
-        await this.registry.sync(enrichedMarkets);
+        // E. Sync Registry (Starts/Stops loops)
+        await this.registry.sync(enrichedMarkets as Market[]);
       }
 
     } catch (err) {
       Logger.error("Control Loop Crash", err);
-    }
-  }
-
-  private async processLaunchRequests() {
-    const { data: requests } = await supabase
-      .from('market_launch_requests')
-      .select('*')
-      .eq('status', 'PENDING');
-
-    if (!requests || requests.length === 0) return;
-
-    Logger.info(`[ORCHESTRATOR] Processing ${requests.length} launch requests...`);
-
-    // Group by asset to minimize API calls
-    const assetRequests = new Map<string, typeof requests>();
-    for(const r of requests) {
-       // Only bundling requests with same asset AND same launch_type
-       const key = `${r.asset}-${r.launch_type}`; 
-       if(!assetRequests.has(key)) assetRequests.set(key, []);
-       assetRequests.get(key)?.push(r);
-    }
-
-    for (const [key, group] of assetRequests) {
-        const asset = group[0].asset;
-        
-        // USE MARKET RESOLVER instead of hardcoded time math
-        Logger.info(`[ORCHESTRATOR] Resolving next available market for ${asset}...`);
-        
-        const marketData = await marketResolver.resolveNextMarket(asset);
-        
-        if (!marketData) {
-             Logger.warn(`[ORCHESTRATOR] No upcoming 15m market found for ${asset}`);
-             // Mark failed so we don't retry forever in a tight loop
-             await supabase.from('market_launch_requests').update({ status: 'FAILED', error_log: 'Market Not Found via Resolver' }).in('id', group.map(r => r.id));
-             continue;
-        }
-
-        const slug = marketData.slug;
-        const startIso = marketData.startDate;
-
-        // 2. Ensure Run Exists (Grouped by Asset + StartTime)
-        const runName = `ORCH-${asset}-${startIso}`;
-        let { data: run } = await supabase.from('test_runs').select('id').eq('name', runName).maybeSingle();
-        
-        if (!run) {
-             const { data: newRun } = await supabase.from('test_runs').insert({
-                 name: runName,
-                 status: 'RUNNING',
-                 params: { direction: 'BOTH', tradeSize: 10, maxExposure: 500 }
-             }).select('id').single();
-             run = newRun;
-        }
-        
-        if (!run) continue; 
-
-        // 3. Upsert Markets for Requested Directions
-        for (const req of group) {
-             // Check if market entry exists
-             const { data: mk } = await supabase.from('markets')
-                 .select('id')
-                 .eq('polymarket_market_id', slug)
-                 .eq('direction', req.direction)
-                 .maybeSingle();
-
-             if (mk) {
-                 await supabase.from('markets').update({
-                     enabled: true,
-                     active_run_id: run.id,
-                     max_exposure: 500,
-                     // Ensure timestamp metadata is fresh
-                     t_open: marketData.startDate,
-                     t_expiry: marketData.endDate
-                 }).eq('id', mk.id);
-             } else {
-                 await supabase.from('markets').insert({
-                     polymarket_market_id: slug,
-                     asset: asset,
-                     direction: req.direction,
-                     enabled: true,
-                     active_run_id: run.id,
-                     max_exposure: 500,
-                     t_open: marketData.startDate,
-                     t_expiry: marketData.endDate,
-                     baseline_price: 0 // Will be hydrated by EdgeEngine
-                 });
-             }
-             
-             // Update request
-             await supabase.from('market_launch_requests').update({ status: 'LAUNCHED', target_market_slug: slug }).eq('id', req.id);
-        }
     }
   }
 }
