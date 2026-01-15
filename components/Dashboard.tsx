@@ -2,8 +2,8 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Play, Square, Activity, Shield, 
-  Terminal, Zap, RefreshCcw, Save,
-  TrendingUp, Clock, Target, AlertTriangle, Info
+  Terminal, RefreshCcw, Save,
+  Info
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -22,11 +22,7 @@ interface ActiveMarket {
 }
 
 interface GlobalConfig {
-    direction: 'UP' | 'DOWN' | 'BOTH';
-    tradeSize: number;
     maxExposure: number;
-    confidenceThreshold: number;
-    cooldown: number;
 }
 
 interface BotHeartbeat {
@@ -47,9 +43,12 @@ export const Dashboard: React.FC = () => {
   // State
   const [activeMarket, setActiveMarket] = useState<ActiveMarket | null>(null);
   const [marketState, setMarketState] = useState<MarketState | null>(null);
+  
+  // Default Config - Strategy params removed, only Risk remains
   const [config, setConfig] = useState<GlobalConfig>({
-      direction: 'BOTH', tradeSize: 10, maxExposure: 100, confidenceThreshold: 0.6, cooldown: 10000
+      maxExposure: 100
   });
+  
   const [botStatus, setBotStatus] = useState<'running' | 'stopped'>('stopped');
   const [heartbeat, setHeartbeat] = useState<BotHeartbeat | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -80,11 +79,14 @@ export const Dashboard: React.FC = () => {
           setMarketState(null);
       }
 
-      // 4. Global Config
+      // 4. Global Config (Risk Only)
       const { data: run } = await supabase.from('test_runs').select('params').eq('name', 'AUTO_TRADER_GLOBAL_CONFIG').maybeSingle();
-      if (run && run.params && !isSaving) { // Don't overwrite if user is typing
-         // Merge in case we added new fields
-         setConfig(prev => ({ ...prev, ...run.params }));
+      if (run && run.params && !isSaving) { 
+         // Only extract maxExposure, ignoring strategy params if they exist in DB
+         const dbExposure = run.params.maxExposure;
+         if (dbExposure !== undefined) {
+             setConfig({ maxExposure: dbExposure });
+         }
       }
 
       // 5. Heartbeat
@@ -104,14 +106,15 @@ export const Dashboard: React.FC = () => {
 
   const saveConfig = async () => {
       setIsSaving(true);
-      // Update the Persistent Global Run
+      // Update only the maxExposure in the persistent config
+      // We assume the backend handles strategy logic internally now.
       const { error } = await supabase.from('test_runs')
-        .update({ params: config })
+        .update({ params: { maxExposure: config.maxExposure } })
         .eq('name', 'AUTO_TRADER_GLOBAL_CONFIG');
         
-      if (error) alert("Failed to save config");
+      if (error) alert("Failed to save risk config");
       
-      // Also Force Sync Control
+      // Force Sync Control
       await supabase.from('bot_control').update({ updated_at: new Date().toISOString() }).eq('id', 1);
       
       setTimeout(() => setIsSaving(false), 1000);
@@ -257,106 +260,51 @@ export const Dashboard: React.FC = () => {
 
         </div>
 
-        {/* RIGHT COL: STRATEGY CONFIG */}
+        {/* RIGHT COL: RISK CONTROL (AUTONOMOUS CONFIG) */}
         <div className="space-y-6">
             
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 shadow-lg">
                 <div className="flex justify-between items-center mb-6">
                     <h3 className="text-sm font-bold text-white uppercase flex items-center gap-2">
-                        <Zap size={16} className="text-yellow-500" /> Strategy Config
+                        <Shield size={16} className="text-emerald-500" /> Risk Control
                     </h3>
                     <button 
                         onClick={saveConfig}
                         disabled={isSaving}
                         className="text-xs bg-emerald-900/30 text-emerald-500 border border-emerald-900 hover:bg-emerald-900/50 px-3 py-1 rounded transition-colors flex items-center gap-1"
                     >
-                        {isSaving ? 'SAVING...' : <><Save size={12} /> SAVE UPDATES</>}
+                        {isSaving ? 'SAVING...' : <><Save size={12} /> UPDATE LIMITS</>}
                     </button>
                 </div>
 
-                <div className="space-y-5">
+                <div className="space-y-6">
+                    
                     <div>
-                        <label className="text-xs text-zinc-500 font-bold uppercase mb-1 block">Trade Direction</label>
-                        <div className="flex bg-zinc-950 rounded p-1 border border-zinc-800">
-                            {['UP', 'BOTH', 'DOWN'].map(d => (
-                                <button
-                                    key={d}
-                                    onClick={() => setConfig({...config, direction: d as any})}
-                                    className={`flex-1 py-1.5 text-xs font-bold rounded transition-colors ${config.direction === d ? 'bg-zinc-800 text-white' : 'text-zinc-600 hover:text-zinc-400'}`}
-                                >
-                                    {d}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-
-                    <div>
-                        <label className="text-xs text-zinc-500 font-bold uppercase mb-1 block flex justify-between">
-                            <span>Base Trade Size</span>
-                            <span className="text-white">${config.tradeSize}</span>
+                        <label className="text-xs text-zinc-500 font-bold uppercase mb-2 block flex justify-between">
+                            <span>Maximum Capital Exposure</span>
+                            <span className="text-white text-lg">${config.maxExposure}</span>
                         </label>
                         <input 
-                            type="range" min="1" max="100" step="1"
-                            value={config.tradeSize}
-                            onChange={(e) => setConfig({...config, tradeSize: parseFloat(e.target.value)})}
+                            type="range" min="50" max="2000" step="50"
+                            value={config.maxExposure}
+                            onChange={(e) => setConfig({ maxExposure: parseFloat(e.target.value) })}
                             className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
                         />
-                    </div>
-
-                    <div>
-                        <label className="text-xs text-zinc-500 font-bold uppercase mb-1 block flex justify-between">
-                            <span>Max Exposure (Budget)</span>
-                            <span className="text-white">${config.maxExposure}</span>
-                        </label>
-                        <input 
-                            type="range" min="50" max="1000" step="10"
-                            value={config.maxExposure}
-                            onChange={(e) => setConfig({...config, maxExposure: parseFloat(e.target.value)})}
-                            className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                        />
-                    </div>
-
-                    <div>
-                        <label className="text-xs text-zinc-500 font-bold uppercase mb-1 block flex justify-between">
-                            <span>Confidence Threshold</span>
-                            <span className="text-white">{(config.confidenceThreshold * 100).toFixed(0)}%</span>
-                        </label>
-                        <input 
-                            type="range" min="0.5" max="0.95" step="0.05"
-                            value={config.confidenceThreshold}
-                            onChange={(e) => setConfig({...config, confidenceThreshold: parseFloat(e.target.value)})}
-                            className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-purple-500"
-                        />
-                    </div>
-
-                     <div className="pt-4 border-t border-zinc-800">
-                        <div className="flex items-start gap-2 bg-blue-900/10 p-3 rounded border border-blue-900/30">
-                            <Info size={14} className="text-blue-500 mt-0.5" />
-                            <p className="text-[10px] text-blue-300 leading-relaxed">
-                                Changes apply immediately to the next tick. The bot will automatically scale out of positions if risk parameters are lowered below current exposure.
-                            </p>
+                        <div className="flex justify-between text-[10px] text-zinc-600 font-mono mt-2">
+                            <span>$50</span>
+                            <span>$2000</span>
                         </div>
                     </div>
+
+                    <div className="flex items-start gap-3 bg-zinc-950/50 p-4 rounded border border-zinc-800">
+                        <Info size={16} className="text-zinc-500 mt-0.5" />
+                        <p className="text-xs text-zinc-400 leading-relaxed">
+                            This is a hard risk limit. The autonomous agent will manage trade sizing and frequency internally, but will <strong>never</strong> exceed ${config.maxExposure} in total allocation.
+                        </p>
+                    </div>
+
                 </div>
             </div>
-
-             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
-                 <h3 className="text-sm font-bold text-zinc-400 uppercase mb-4">Risk Guards</h3>
-                 <div className="space-y-2">
-                     <div className="flex justify-between text-xs">
-                         <span className="text-zinc-500">Stop Loss</span>
-                         <span className="text-zinc-300">Automatic (Regime Flip)</span>
-                     </div>
-                     <div className="flex justify-between text-xs">
-                         <span className="text-zinc-500">Expiry Cutoff</span>
-                         <span className="text-zinc-300">3 Minutes</span>
-                     </div>
-                     <div className="flex justify-between text-xs">
-                         <span className="text-zinc-500">Max Volatility</span>
-                         <span className="text-zinc-300">2.5% / min</span>
-                     </div>
-                 </div>
-             </div>
 
         </div>
 

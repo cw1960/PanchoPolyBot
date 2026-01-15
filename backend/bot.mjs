@@ -80,7 +80,7 @@ wss.on('connection', (ws) => {
 
     ws.on('message', async (message) => {
         try {
-            const data = JSON.parse(message);
+            const data = JSON.parse(message.toString());
             if (data.type === 'UPDATE_CONFIG') {
                 const { slug, betSize, maxEntryPrice, minPriceDelta, referencePrice } = data.payload;
                 
@@ -338,7 +338,7 @@ function startTrading() {
         if (isProcessing) return;
         isProcessing = true;
         try {
-            const trade = JSON.parse(data);
+            const trade = JSON.parse(data.toString());
             const spotPrice = parseFloat(trade.p);
             
             if (activeMarkets.length > 0) {
