@@ -242,15 +242,15 @@ export const Dashboard: React.FC = () => {
                 <div className="font-mono text-xs space-y-2 text-zinc-400">
                     {activeMarket ? (
                          <>
-                           <div className="text-emerald-500">> [AUTO] Locked on market: {activeMarket.polymarket_market_id.substring(0, 40)}...</div>
-                           <div>> [EDGE] Monitoring volatility... Regime: {marketState?.status || 'WATCHING'}</div>
+                           <div className="text-emerald-500">{'>'} [AUTO] Locked on market: {activeMarket.polymarket_market_id.substring(0, 40)}...</div>
+                           <div>{'>'} [EDGE] Monitoring volatility... Regime: {marketState?.status || 'WATCHING'}</div>
                            {marketState && marketState.exposure > 0 && (
-                               <div className="text-yellow-500">> [RISK] Current Exposure: ${marketState.exposure.toFixed(2)}</div>
+                               <div className="text-yellow-500">{'>'} [RISK] Current Exposure: ${marketState.exposure.toFixed(2)}</div>
                            )}
-                           <div className="opacity-50">> Waiting for signal...</div>
+                           <div className="opacity-50">{'>'} Waiting for signal...</div>
                          </>
                     ) : (
-                         <div className="text-zinc-600 animate-pulse">> system_idle: waiting for market discovery...</div>
+                         <div className="text-zinc-600 animate-pulse">{'>'} system_idle: waiting for market discovery...</div>
                     )}
                 </div>
             </div>
