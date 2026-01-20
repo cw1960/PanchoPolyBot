@@ -1,6 +1,7 @@
 
 import { IsolatedMarketAccount } from '../types/accounts';
 import { Logger } from '../utils/logger';
+import { telemetry } from './telemetry';
 
 const INITIAL_BANKROLL = 500;
 
@@ -17,6 +18,7 @@ export const MARKET_CONFIGS = [
 
 export class AccountManager {
     private accounts: Map<string, IsolatedMarketAccount> = new Map();
+    private lastSnapshotTime: number = 0;
 
     constructor() {
         this.initialize();
@@ -74,6 +76,7 @@ export class AccountManager {
             if (account.currentExposure < 0) account.currentExposure = 0;
             
             this.logState(account);
+            this.maybeSnapshot();
         } catch (e) {
             Logger.error(`[ACCOUNT_MANAGER] Failed to update exposure`, e);
         }
@@ -93,6 +96,7 @@ export class AccountManager {
             account.maxExposure = Math.max(0, account.bankroll);
             
             this.logState(account);
+            this.maybeSnapshot();
         } catch (e) {
              Logger.error(`[ACCOUNT_MANAGER] Failed to update PnL`, e);
         }
@@ -100,6 +104,34 @@ export class AccountManager {
 
     private logState(acc: IsolatedMarketAccount) {
         Logger.info(`[MARKET ${acc.marketKey}] bankroll=${acc.bankroll.toFixed(2)} exposure=${acc.currentExposure.toFixed(2)} pnl=${acc.realizedPnL.toFixed(2)}`);
+    }
+
+    /**
+     * Records a global bankroll snapshot to Supabase occasionally.
+     */
+    private maybeSnapshot() {
+        const now = Date.now();
+        // Throttle snapshots to every 10 minutes unless force called
+        if (now - this.lastSnapshotTime < 600000) return;
+
+        this.lastSnapshotTime = now;
+
+        let totalBankroll = 0;
+        let totalExposure = 0;
+        let activeCount = 0;
+
+        for (const acc of this.accounts.values()) {
+            totalBankroll += acc.bankroll;
+            totalExposure += acc.currentExposure;
+            if (acc.currentExposure > 0) activeCount++;
+        }
+
+        telemetry.logBankroll({
+            total_bankroll_usd: totalBankroll,
+            cap_per_market_usd: 100, // Hardcoded per strategy def for now
+            total_exposure_usd: totalExposure,
+            active_markets_count: activeCount
+        });
     }
 }
 

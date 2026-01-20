@@ -1,4 +1,5 @@
 
+
 export interface BotControl {
   id: number;
   desired_state: 'running' | 'stopped';
@@ -103,4 +104,44 @@ export interface MarketLaunchRequest {
   created_at?: string;
   target_market_slug?: string;
   error_log?: string;
+}
+
+// --- TELEMETRY TYPES ---
+
+export interface BotTickRow {
+  run_id?: string;
+  market_slug: string;
+  ts?: string;
+  yes_price: number;
+  no_price: number;
+  spread: number;
+  pair_cost: number;
+  model_prob: number;
+  edge_raw: number;
+  edge_after_fees: number;
+  kelly_fraction: number;
+  recommended_size_usd: number;
+  actual_size_usd: number;
+  signal_tag: string;
+  regime_tag: string;
+}
+
+export interface BotMarketRow {
+  slug: string;
+  run_id?: string;
+  start_time: string;
+  end_time?: string;
+  total_pnl_usd: number;
+  total_fees_usd: number;
+  trade_count: number;
+  avg_edge_captured: number;
+  max_drawdown_usd: number;
+  regime_tag: string;
+}
+
+export interface BotBankrollRow {
+  total_bankroll_usd: number;
+  cap_per_market_usd: number;
+  total_exposure_usd: number;
+  active_markets_count: number;
 }

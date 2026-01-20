@@ -1,5 +1,5 @@
 
-import { Market, MarketStateRow } from '../types/tables';
+import { Market, MarketStateRow, BotTickRow } from '../types/tables';
 import { Logger } from '../utils/logger';
 import { ENV } from '../config/env';
 import { DEFAULTS } from '../config/defaults';
@@ -10,6 +10,8 @@ import { polymarket } from '../services/polymarket';
 import { pnlLedger } from '../services/pnlLedger';
 import { defensiveExitEvaluator } from '../services/defensiveExit';
 import { accountManager } from '../services/accountManager'; 
+import { telemetry } from '../services/telemetry';
+import { feeModel } from '../services/feeModel';
 import { IsolatedMarketAccount } from '../types/accounts';
 
 interface TierConfig {
@@ -137,11 +139,36 @@ export class MarketLoop {
         this.intervalId = null;
     }
     
+    // TELEMETRY: MARKET SUMMARY
+    this.logMarketClosureSummary();
+
     if (this.hasExitedDefensively) {
         Logger.info(`[MARKET_TERMINATED] reason=DEFENSIVE_EXIT marketId=${this.market.id}`);
     } else {
         Logger.info(`[MARKET_TERMINATED] marketId=${this.market.id} reason=${reason}`);
     }
+  }
+
+  private async logMarketClosureSummary() {
+      if (!this._immutableAccount) return;
+      
+      // Basic PnL stats from account manager
+      const acc = this._immutableAccount;
+      
+      const summary = {
+          slug: this.market.polymarket_market_id,
+          run_id: this.market.active_run_id,
+          start_time: this.market.t_open || new Date().toISOString(),
+          end_time: new Date().toISOString(),
+          total_pnl_usd: acc.realizedPnL,
+          total_fees_usd: 0, // Need to track this separately if required
+          trade_count: this.scalingState.clipsPlaced,
+          avg_edge_captured: 0, // Placeholder
+          max_drawdown_usd: 0, // Placeholder
+          regime_tag: this.scalingState.entryRegime || 'UNKNOWN'
+      };
+      
+      await telemetry.logMarketSummary(summary);
   }
 
   public updateConfig(newConfig: Market) {
@@ -190,13 +217,79 @@ export class MarketLoop {
       }
 
       if (!observation) {
-          const now = Date.now();
-          if (now - this.lastLogTime > 10000) {
-              Logger.info(`[LOOP] Waiting for Data/Hydration... (${this.market.polymarket_market_id})`);
-              this.lastLogTime = now;
-          }
           return;
       }
+
+      // --- TELEMETRY & KELLY CALCULATION START ---
+      
+      // 1. Fetch Pair Prices (Approximate)
+      let yesPrice = 0;
+      let noPrice = 0;
+      
+      if (observation.orderBook) {
+          // If we are observing UP, orderBook.bestAsk is UP price
+          if (observation.direction === 'UP') {
+              yesPrice = observation.orderBook.bestAsk;
+              noPrice = 1 - observation.orderBook.bestBid; // Crude approx if only one side fetched
+          } else if (observation.direction === 'DOWN') {
+              noPrice = observation.orderBook.bestAsk;
+              yesPrice = 1 - observation.orderBook.bestBid;
+          }
+          
+          // Better: If EdgeEngine fetches both sides (it currently fetches target side).
+          // Ideally we fetch both tokens, but for now we approximate Pair Cost based on available data or assume 1.0 if incomplete.
+      }
+      
+      const pairCost = yesPrice + noPrice || 1.0; // Default to 1 if unavailable
+      
+      // 2. Metrics
+      const modelProb = observation.calculatedProbability;
+      const marketProb = observation.impliedProbability;
+      const rawEdge = Math.abs(modelProb - marketProb);
+      
+      const metrics = feeModel.calculateMetrics(marketProb, modelProb, 10);
+      const edgeAfterFees = metrics.edgePct / 100;
+
+      // 3. Kelly Criterion
+      // K = Edge / Variance
+      // Variance of Binary Option ~ p(1-p). We use Model P.
+      const varianceApprox = modelProb * (1 - modelProb);
+      let kellyFraction = 0;
+      if (varianceApprox > 0.01) {
+          kellyFraction = edgeAfterFees / varianceApprox;
+      }
+      
+      // 4. Sizing
+      // size = min(cap, bankroll * kelly * 0.5)
+      let bankroll = 500;
+      let cap = 100;
+      if (this._immutableAccount) {
+          bankroll = this._immutableAccount.bankroll;
+          cap = this._immutableAccount.maxExposure;
+      }
+      
+      const recommendedSize = Math.min(cap, Math.max(0, bankroll * kellyFraction * 0.5));
+
+      // 5. Log Tick
+      telemetry.logTick({
+          run_id: run.id,
+          market_slug: this.market.polymarket_market_id,
+          ts: new Date().toISOString(),
+          yes_price: yesPrice,
+          no_price: noPrice,
+          spread: observation.orderBook?.spread || 0,
+          pair_cost: pairCost,
+          model_prob: modelProb,
+          edge_raw: rawEdge,
+          edge_after_fees: edgeAfterFees,
+          kelly_fraction: kellyFraction,
+          recommended_size_usd: recommendedSize,
+          actual_size_usd: 0, // Updated if trade happens below
+          signal_tag: observation.isSafeToTrade ? 'ACTIVE' : 'WAIT',
+          regime_tag: observation.regime
+      });
+
+      // --- TELEMETRY END ---
 
       this.priceHistory.push({ price: observation.spot.price, time: observation.timestamp });
       const cutoff = Date.now() - this.HISTORY_WINDOW_MS;
@@ -229,16 +322,9 @@ export class MarketLoop {
                throw new Error(`[INVARIANT_VIOLATION] Locked Direction ${this.scalingState.lockedDirection} mismatch with Account ${this._immutableAccount.direction}`);
           }
 
-          // SIGNAL FLIP GUARD: Even if observation says DOWN, we stay locked UP
-          if (observation.direction !== 'NEUTRAL' && observation.direction !== this.scalingState.lockedDirection) {
-              Logger.warn(`[LOCK_PERSISTS_SIGNAL_IGNORED] Locked=${this.scalingState.lockedDirection} Signal=${observation.direction}`);
-          }
-
           activeAccount = this._immutableAccount;
           currentAccountExposure = activeAccount.currentExposure;
       } else {
-          // WATCH PATH: Use Observation Direction
-          // No lock yet, so we peek at the potential account.
           if (observation.direction !== 'NEUTRAL') {
                activeAccount = accountManager.getAccount(this.market.asset, observation.direction);
                currentAccountExposure = activeAccount.currentExposure;
@@ -247,7 +333,6 @@ export class MarketLoop {
 
       // 5. DEFENSIVE EXIT EVALUATION
       if (this.scalingState.lockedDirection && activeAccount) {
-          // Verify we passed the correct account
           if (activeAccount !== this._immutableAccount) {
               throw new Error("[INVARIANT_VIOLATION] Active Account !== Immutable Account during Defensive Check");
           }
@@ -266,9 +351,37 @@ export class MarketLoop {
       }
 
       // 6. SCALING EVALUATION
+      let tradeOccurred = false;
+      let tradeSize = 0;
+
       if (status !== 'LOCKED') {
-          await this.evaluateScaling(observation, run.params?.cooldown || DEFAULTS.DEFAULT_COOLDOWN_MS);
+          const tradeRes = await this.evaluateScaling(observation, run.params?.cooldown || DEFAULTS.DEFAULT_COOLDOWN_MS);
+          if (tradeRes && tradeRes.executed) {
+              tradeOccurred = true;
+              tradeSize = tradeRes.sizeUsd || 0;
+          }
           if (this.scalingState.clipsPlaced > 0) status = 'OPPORTUNITY';
+      }
+      
+      // Update Actual Size in Telemetry if Trade Occurred
+      if (tradeOccurred) {
+          telemetry.logTick({
+              run_id: run.id,
+              market_slug: this.market.polymarket_market_id,
+              ts: new Date().toISOString(),
+              yes_price: yesPrice,
+              no_price: noPrice,
+              spread: observation.orderBook?.spread || 0,
+              pair_cost: pairCost,
+              model_prob: modelProb,
+              edge_raw: rawEdge,
+              edge_after_fees: edgeAfterFees,
+              kelly_fraction: kellyFraction,
+              recommended_size_usd: recommendedSize,
+              actual_size_usd: tradeSize,
+              signal_tag: 'EXECUTE',
+              regime_tag: observation.regime
+          });
       }
 
       // 7. PnL Sync 
@@ -329,7 +442,7 @@ export class MarketLoop {
       }
   }
 
-  private async evaluateScaling(obs: any, cooldown: number) {
+  private async evaluateScaling(obs: any, cooldown: number): Promise<{executed: boolean, sizeUsd?: number} | undefined> {
       if (obs.direction === 'NEUTRAL') return;
 
       // A. Direction Lock Check
@@ -409,9 +522,14 @@ export class MarketLoop {
               }
               
               Logger.info(`[SCALING] Executed Clip #${this.scalingState.clipsPlaced} (Tier ${tierConfig.level})`);
+              
+              // Return size for Telemetry
+              // Approximation of base size for now, ideally ExecutionService returns precise USD used
+              return { executed: true, sizeUsd: 10 * tierConfig.sizeMult }; 
           } else if (executionMode === 'PASSIVE') {
              Logger.info(`[SCALING] Passive Attempt Missed/Skipped. Waiting for next tick.`);
           }
       }
+      return { executed: false };
   }
 }
