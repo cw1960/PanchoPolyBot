@@ -77,6 +77,20 @@ export const Dashboard: React.FC = () => {
 
   const latest = ticks.length > 0 ? ticks[0] : null;
 
+  // ---- PNL CALCULATIONS ----
+  const runningPnl = ticks.reduce((acc, t) => {
+    const pnl = (1 - t.pair_cost) * t.recommended_size;
+    return acc + pnl;
+  }, 0);
+
+  const lastPnl = latest
+    ? (1 - latest.pair_cost) * latest.recommended_size
+    : 0;
+
+  const lastEdgePct = latest
+    ? (1 - latest.pair_cost) * 100
+    : 0;
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-300 p-6">
 
@@ -96,6 +110,41 @@ export const Dashboard: React.FC = () => {
         <Card label="Cap / Market" value={bankroll?.cap_per_market?.toFixed(2) ?? "--"} />
         <Card label="Exposure" value={bankroll?.exposure?.toFixed(2) ?? "--"} />
       </div>
+
+      {/* ===== NEW PNL SECTION ===== */}
+      {latest && (
+        <div className="bg-black border border-zinc-800 p-4 rounded mb-6">
+
+          <h2 className="text-xs text-zinc-500 mb-2">
+            ESTIMATED PAPER PNL
+          </h2>
+
+          <div className="grid grid-cols-3 gap-4 mb-4">
+
+            <Card
+              label="Last Trade PnL $"
+              value={lastPnl.toFixed(2)}
+            />
+
+            <Card
+              label="Edge %"
+              value={lastEdgePct.toFixed(3) + "%"}
+            />
+
+            <Card
+              label="Kelly Size $"
+              value={latest.recommended_size.toFixed(2)}
+            />
+
+          </div>
+
+          <div className="font-mono text-sm text-emerald-400">
+            Running estimate: {runningPnl.toFixed(2)}
+          </div>
+
+        </div>
+      )}
+      {/* ===== END NEW SECTION ===== */}
 
       {/* LATEST SIGNAL */}
       {latest && (
