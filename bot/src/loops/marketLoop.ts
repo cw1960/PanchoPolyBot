@@ -61,6 +61,10 @@ export class MarketLoop {
   private readonly HISTORY_WINDOW_MS = 60000; 
   private readonly PNL_SYNC_INTERVAL_MS = 10000; 
 
+  // KELLY LIMITS
+  private readonly KELLY_CAP = 0.25; 
+  private readonly MIN_TRADE_SIZE_USD = 1.0;
+
   private readonly SCALING_PLAN: TierConfig[] = [
       { level: 1, minConf: 0.60, persistenceSamples: 3, windowSize: 5, sizeMult: 1.0 },
       { level: 2, minConf: 0.70, persistenceSamples: 3, windowSize: 5, sizeMult: 1.0 }, 
@@ -227,40 +231,34 @@ export class MarketLoop {
       let noPrice = 0;
       
       if (observation.orderBook) {
-          // If we are observing UP, orderBook.bestAsk is UP price
           if (observation.direction === 'UP') {
               yesPrice = observation.orderBook.bestAsk;
-              noPrice = 1 - observation.orderBook.bestBid; // Crude approx if only one side fetched
+              noPrice = 1 - observation.orderBook.bestBid;
           } else if (observation.direction === 'DOWN') {
               noPrice = observation.orderBook.bestAsk;
               yesPrice = 1 - observation.orderBook.bestBid;
           }
-          
-          // Better: If EdgeEngine fetches both sides (it currently fetches target side).
-          // Ideally we fetch both tokens, but for now we approximate Pair Cost based on available data or assume 1.0 if incomplete.
       }
       
-      const pairCost = yesPrice + noPrice || 1.0; // Default to 1 if unavailable
-      
-      // 2. Metrics
+      const pairCost = yesPrice + noPrice || 1.0;
       const modelProb = observation.calculatedProbability;
       const marketProb = observation.impliedProbability;
       const rawEdge = Math.abs(modelProb - marketProb);
       
-      const metrics = feeModel.calculateMetrics(marketProb, modelProb, 10);
+      // 2. Metrics (Using default isMaker=false for conservative sizing)
+      const metrics = feeModel.calculateMetrics(marketProb, modelProb, 10, false);
       const edgeAfterFees = metrics.edgePct / 100;
 
-      // 3. Kelly Criterion
+      // 3. Kelly Criterion (REFINED)
       // K = Edge / Variance
-      // Variance of Binary Option ~ p(1-p). We use Model P.
       const varianceApprox = modelProb * (1 - modelProb);
       let kellyFraction = 0;
-      if (varianceApprox > 0.01) {
-          kellyFraction = edgeAfterFees / varianceApprox;
+      if (varianceApprox > 0.01 && edgeAfterFees > 0) {
+          const kRaw = edgeAfterFees / varianceApprox;
+          kellyFraction = Math.min(this.KELLY_CAP, Math.max(0, kRaw)); // Cap at 25%
       }
       
       // 4. Sizing
-      // size = min(cap, bankroll * kelly * 0.5)
       let bankroll = 500;
       let cap = 100;
       if (this._immutableAccount) {
@@ -268,9 +266,27 @@ export class MarketLoop {
           cap = this._immutableAccount.maxExposure;
       }
       
-      const recommendedSize = Math.min(cap, Math.max(0, bankroll * kellyFraction * 0.5));
+      // Basic sizing formula: Bankroll * Kelly. 
+      // We still respect maxExposure cap.
+      const rawSize = bankroll * kellyFraction;
+      const recommendedSize = Math.min(cap, rawSize);
 
-      // 5. Log Tick
+      let signalTag = observation.isSafeToTrade ? 'ACTIVE' : 'WAIT';
+
+      // 5. MISSED OPPORTUNITY LOGIC
+      // If we have a valid edge but can't trade due to min size or cooldown
+      const cooldownMs = run.params?.cooldown || DEFAULTS.DEFAULT_COOLDOWN_MS;
+      const inCooldown = (Date.now() - this.lastTradeTime) < cooldownMs;
+
+      if (observation.isSafeToTrade && edgeAfterFees > 0) {
+          if (recommendedSize < this.MIN_TRADE_SIZE_USD) {
+              signalTag = 'MISSED_SIZE_TOO_SMALL';
+          } else if (inCooldown) {
+              signalTag = 'MISSED_COOLDOWN';
+          }
+      }
+
+      // 6. Log Tick
       telemetry.logTick({
           run_id: run.id,
           market_slug: this.market.polymarket_market_id,
@@ -284,8 +300,8 @@ export class MarketLoop {
           edge_after_fees: edgeAfterFees,
           kelly_fraction: kellyFraction,
           recommended_size_usd: recommendedSize,
-          actual_size_usd: 0, // Updated if trade happens below
-          signal_tag: observation.isSafeToTrade ? 'ACTIVE' : 'WAIT',
+          actual_size_usd: 0, // Updated if trade happens
+          signal_tag: signalTag,
           regime_tag: observation.regime
       });
 
@@ -314,14 +330,11 @@ export class MarketLoop {
       if (this.scalingState.lockedDirection) {
           // STRICT PATH: Use Immutable Account
           if (!this._immutableAccount) {
-              // Safety: Attempt re-resolution if somehow null (e.g. forced lock but no hydration yet)
               this._immutableAccount = accountManager.getAccount(this.market.asset, this.scalingState.lockedDirection);
           }
-          
           if (this._immutableAccount.direction !== this.scalingState.lockedDirection) {
                throw new Error(`[INVARIANT_VIOLATION] Locked Direction ${this.scalingState.lockedDirection} mismatch with Account ${this._immutableAccount.direction}`);
           }
-
           activeAccount = this._immutableAccount;
           currentAccountExposure = activeAccount.currentExposure;
       } else {
@@ -355,10 +368,18 @@ export class MarketLoop {
       let tradeSize = 0;
 
       if (status !== 'LOCKED') {
-          const tradeRes = await this.evaluateScaling(observation, run.params?.cooldown || DEFAULTS.DEFAULT_COOLDOWN_MS);
-          if (tradeRes && tradeRes.executed) {
-              tradeOccurred = true;
-              tradeSize = tradeRes.sizeUsd || 0;
+          // Enforce min size here as well to prevent dust trades
+          if (recommendedSize >= this.MIN_TRADE_SIZE_USD) {
+              const tradeRes = await this.evaluateScaling(
+                  observation, 
+                  cooldownMs, 
+                  recommendedSize // Pass dynamic size
+              );
+              
+              if (tradeRes && tradeRes.executed) {
+                  tradeOccurred = true;
+                  tradeSize = tradeRes.sizeUsd || 0;
+              }
           }
           if (this.scalingState.clipsPlaced > 0) status = 'OPPORTUNITY';
       }
@@ -442,7 +463,7 @@ export class MarketLoop {
       }
   }
 
-  private async evaluateScaling(obs: any, cooldown: number): Promise<{executed: boolean, sizeUsd?: number} | undefined> {
+  private async evaluateScaling(obs: any, cooldown: number, dynamicSize: number): Promise<{executed: boolean, sizeUsd?: number} | undefined> {
       if (obs.direction === 'NEUTRAL') return;
 
       // A. Direction Lock Check
@@ -479,14 +500,13 @@ export class MarketLoop {
       if (isEligible) {
           // F. PASSIVE VS AGGRESSIVE MODE SELECTION
           let executionMode: ExecutionMode = 'AGGRESSIVE';
-          const timeRemaining = obs.timeToExpiryMs || 0;
-          const spread = obs.orderBook?.spread || 0;
           
-          if (timeRemaining > 3 * 60 * 1000 && spread >= 0.02) {
+          // Refined execution logic: If Spread is WIDE or regime is WIDE_SPREAD, force Passive
+          if (obs.regime === 'WIDE_SPREAD' || (obs.orderBook && obs.orderBook.spread > 0.03)) {
               executionMode = 'PASSIVE';
           }
 
-          Logger.info(`[SCALING] Tier ${tierConfig.level} Eligible (Conf=${obs.confidence.toFixed(2)}). Mode: ${executionMode}`);
+          Logger.info(`[SCALING] Tier ${tierConfig.level} Eligible (Conf=${obs.confidence.toFixed(2)}). Mode: ${executionMode} Size: $${dynamicSize.toFixed(2)}`);
           
           const result = await executionService.attemptTrade(
               this.market, 
@@ -495,7 +515,7 @@ export class MarketLoop {
                   tierLevel: tierConfig.level, 
                   clipIndex: nextTierIdx + 1,
                   scalingFactor: tierConfig.sizeMult,
-                  tradeSizeOverride: 0, 
+                  tradeSizeOverride: dynamicSize, 
                   mode: executionMode,
                   lockedDirection: this.scalingState.lockedDirection
               }
@@ -523,9 +543,7 @@ export class MarketLoop {
               
               Logger.info(`[SCALING] Executed Clip #${this.scalingState.clipsPlaced} (Tier ${tierConfig.level})`);
               
-              // Return size for Telemetry
-              // Approximation of base size for now, ideally ExecutionService returns precise USD used
-              return { executed: true, sizeUsd: 10 * tierConfig.sizeMult }; 
+              return { executed: true, sizeUsd: dynamicSize }; 
           } else if (executionMode === 'PASSIVE') {
              Logger.info(`[SCALING] Passive Attempt Missed/Skipped. Waiting for next tick.`);
           }

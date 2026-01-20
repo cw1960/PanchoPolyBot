@@ -1,3 +1,4 @@
+
 import { Market } from '../types/tables';
 import { MarketObservation } from '../types/marketEdge';
 import { Logger } from '../utils/logger';
@@ -53,6 +54,8 @@ export class EdgeEngine {
   
   // Risk Config
   private readonly NO_TRADE_ZONE_MS = 2 * 60 * 1000; 
+  private readonly PRE_RESOLUTION_ZONE_MS = 5 * 60 * 1000;
+  
   private readonly MIN_REALIZED_VOL = 0.0005; 
   private readonly MAX_REALIZED_VOL = 0.02;   
   private readonly REGIME_LOW_VOL = 0.001;  
@@ -190,11 +193,10 @@ export class EdgeEngine {
 
     const now = Date.now();
     
-    // 2. Fetch Live Data (using mocked or real service based on env)
+    // 2. Fetch Live Data
     let clData, spotPrice;
     try {
       [clData, spotPrice] = await Promise.all([
-        // UPDATED: No longer passing market slug, STRICT asset-only call
         this.chainlink.getLatestPrice(asset),
         this.spot.getSpotPrice(asset)
       ]);
@@ -204,7 +206,6 @@ export class EdgeEngine {
     }
 
     if (!clData || !spotPrice) {
-        // Mock fallback explicitly if null returned in weird cases
         if (ENV.DRY_RUN) {
              clData = { price: 45000, timestamp: now, source: 'MOCK_FALLBACK' };
              spotPrice = 45000;
@@ -224,10 +225,11 @@ export class EdgeEngine {
     const delta = spotPrice - baseline;
     const direction = delta > 0 ? 'UP' : 'DOWN';
 
-    // 5. Volatility & Regime
+    // 5. Volatility & REGIME DETECTION
     let realizedVolPerMin = this.MIN_REALIZED_VOL;
-    let regime: 'LOW_VOL' | 'NORMAL' | 'HIGH_VOL' = 'NORMAL';
+    let regime: 'LOW_VOL' | 'NORMAL' | 'HIGH_VOL' | 'TIGHT_SPREAD' | 'WIDE_SPREAD' | 'PRE_RESOLUTION' | 'UNKNOWN' = 'NORMAL';
     
+    // A. Volatility Calculation
     if (priceHistory.length > 5) {
         const returns: number[] = [];
         for (let i = 1; i < priceHistory.length; i++) {
@@ -247,21 +249,17 @@ export class EdgeEngine {
         }
     }
     
+    // B. Base Regime from Vol
     if (realizedVolPerMin < this.REGIME_LOW_VOL) regime = 'LOW_VOL';
     else if (realizedVolPerMin > this.REGIME_HIGH_VOL) regime = 'HIGH_VOL';
     realizedVolPerMin = Math.max(this.MIN_REALIZED_VOL, Math.min(this.MAX_REALIZED_VOL, realizedVolPerMin));
 
-    // 6. Probability Model
-    let calculatedProbability = 0.5;
-    if (timeRemaining > 0) {
-        const minutesLeft = Math.max(timeRemaining / 60000, 0.1); 
-        const stdDevToExpiry = realizedVolPerMin * Math.sqrt(minutesLeft);
-        const logReturn = Math.log(spotPrice / baseline);
-        const z = logReturn / stdDevToExpiry;
-        calculatedProbability = this.getNormalCDF(z);
+    // C. Time Override
+    if (timeRemaining < this.PRE_RESOLUTION_ZONE_MS) {
+        regime = 'PRE_RESOLUTION';
     }
 
-    // 7. Order Book
+    // 6. Order Book & Spread-Based Regime Override
     let impliedProbability = 0;
     let orderBookSnapshot = undefined;
     
@@ -279,7 +277,24 @@ export class EdgeEngine {
                 bestAsk: depth.bestAsk,
                 spread: depth.bestAsk - depth.bestBid
             };
+            
+            // D. Spread Override (Most critical for execution quality)
+            if (orderBookSnapshot.spread <= 0.01) {
+                regime = 'TIGHT_SPREAD';
+            } else if (orderBookSnapshot.spread >= 0.04) {
+                regime = 'WIDE_SPREAD';
+            }
         }
+    }
+
+    // 7. Probability Model
+    let calculatedProbability = 0.5;
+    if (timeRemaining > 0) {
+        const minutesLeft = Math.max(timeRemaining / 60000, 0.1); 
+        const stdDevToExpiry = realizedVolPerMin * Math.sqrt(minutesLeft);
+        const logReturn = Math.log(spotPrice / baseline);
+        const z = logReturn / stdDevToExpiry;
+        calculatedProbability = this.getNormalCDF(z);
     }
 
     const rawConf = direction === 'UP' ? calculatedProbability : (1 - calculatedProbability);

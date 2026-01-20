@@ -1,4 +1,5 @@
 
+
 export interface PriceData {
   price: number;
   timestamp: number;
@@ -23,7 +24,12 @@ export interface MarketObservation {
   isSafeToTrade?: boolean;       // True if outside No-Trade Zone
   
   // Market State Tag
-  regime: 'LOW_VOL' | 'NORMAL' | 'HIGH_VOL' | 'UNKNOWN';
+  // REFINED REGIMES:
+  // TIGHT_SPREAD: Spread < 1 cent
+  // WIDE_SPREAD: Spread > 3 cents
+  // PRE_RESOLUTION: < 5 mins to expiry
+  // HIGH_VOL: Realized vol spike
+  regime: 'LOW_VOL' | 'NORMAL' | 'HIGH_VOL' | 'TIGHT_SPREAD' | 'WIDE_SPREAD' | 'PRE_RESOLUTION' | 'UNKNOWN';
 
   // Order Book Snapshot for Maker Logic
   orderBook?: {

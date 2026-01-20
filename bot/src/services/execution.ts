@@ -237,7 +237,7 @@ export class ExecutionService {
         }
     }
     
-    const metrics = feeModel.calculateMetrics(executionPrice, obs.confidence, betSizeUSDC);
+    const metrics = feeModel.calculateMetrics(executionPrice, obs.confidence, betSizeUSDC, isMaker);
     
     const signalSnapshot = {
         baseline_price: market.baseline_price,
@@ -265,8 +265,8 @@ export class ExecutionService {
       edge_after_fees_pct: metrics.edgePct,
       ev_after_fees_usd: metrics.evUsd,
       fees: {
-        buy_fee_pct: metrics.buyFeePct,
-        sell_fee_pct: metrics.sellFeePct
+        buy_fee_pct: metrics.feePct,
+        sell_fee_pct: metrics.feePct
       },
       signals: signalSnapshot, 
       status: 'INTENDED',

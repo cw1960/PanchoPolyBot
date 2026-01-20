@@ -1,20 +1,15 @@
 
+
 export interface FeeConfig {
-  buy_fee_peak_pct: number;
-  buy_fee_peak_at_prob: number;
-  sell_fee_peak_pct: number;
-  sell_fee_peak_at_prob: number;
-  min_fee_pct: number;
-  shape_exponent: number;
+  taker_fee_pct: number;
+  maker_fee_pct: number;
+  slippage_assumption_bps: number;
 }
 
 export const DEFAULT_FEE_CONFIG: FeeConfig = {
-  buy_fee_peak_pct: 0.016, // 1.6%
-  buy_fee_peak_at_prob: 0.50,
-  sell_fee_peak_pct: 0.037, // 3.7%
-  sell_fee_peak_at_prob: 0.30,
-  min_fee_pct: 0.002,      // 0.2%
-  shape_exponent: 2.0
+  taker_fee_pct: 0.02, // 2% Taker Fee (Standard CTF)
+  maker_fee_pct: 0.00, // 0% Maker Fee (Standard CTF, sometimes rebate)
+  slippage_assumption_bps: 10 // 10bps conservative slippage estimate
 };
 
 export class FeeModel {
@@ -24,91 +19,59 @@ export class FeeModel {
     this.config = config;
   }
 
-  public updateConfig(newConfig: Partial<FeeConfig>) {
-    this.config = { ...this.config, ...newConfig };
-  }
-
-  public getConfig(): FeeConfig {
-    return this.config;
-  }
-
   /**
-   * Calculates the fee percentage based on the parametric bell-curve approximation.
-   * 
-   * Formula:
-   * dist = abs(prob - peak_at)
-   * normalized = min(1, dist / 0.5)
-   * fee = min + (peak - min) * (1 - normalized^exponent)
-   */
-  public getFeePct(prob: number, isBuy: boolean): number {
-    const peak = isBuy ? this.config.buy_fee_peak_pct : this.config.sell_fee_peak_pct;
-    const peakAt = isBuy ? this.config.buy_fee_peak_at_prob : this.config.sell_fee_peak_at_prob;
-    const min = this.config.min_fee_pct;
-    const exponent = this.config.shape_exponent;
-
-    // Distance from the peak probability (0.0 to 1.0 range usually)
-    const dist = Math.abs(prob - peakAt);
-    
-    // Normalize distance. We assume the curve spans roughly 0.5 distance from peak.
-    // If dist >= 0.5, we are at the floor.
-    const normalizedDist = Math.min(1, dist / 0.5);
-
-    // Calculate curve factor (1 at peak, 0 at floor)
-    const curveFactor = 1 - Math.pow(normalizedDist, exponent);
-
-    // Interpolate
-    const fee = min + (peak - min) * curveFactor;
-
-    // Clamp for safety
-    return Math.max(min, Math.min(peak, fee));
-  }
-
-  /**
-   * Calculates Expected Value (EV) and Edge after estimated fees.
+   * Calculates Expected Value (EV) and Edge after fees and slippage.
    * 
    * @param entryProb The market price/probability at entry (0..1)
    * @param confidence The bot's estimated probability of winning (0..1)
    * @param stake The gross amount intended to bet (e.g., $10)
+   * @param isMaker Whether we intend to post a Limit order (Maker) or Market (Taker)
    */
-  public calculateMetrics(entryProb: number, confidence: number, stake: number) {
-    const buyFeePct = this.getFeePct(entryProb, true);
-    // We assume exit probability is roughly entry probability for the sake of strict fee estimation 
-    // unless a specific target is known. For "Edge", we often assume we hold to expiry or sell at similar levels.
-    // Using entryProb for sell fee estimation is a safe conservative proxy for now.
-    const sellFeePct = this.getFeePct(entryProb, false);
+  public calculateMetrics(
+      entryProb: number, 
+      confidence: number, 
+      stake: number, 
+      isMaker: boolean = false
+    ) {
+    
+    // 1. Fee Rate Selection
+    const exchangeFeePct = isMaker ? this.config.maker_fee_pct : this.config.taker_fee_pct;
+    
+    // 2. Slippage (Only applies to Taker usually, but modeled for safety on both)
+    const slippagePct = isMaker ? 0 : (this.config.slippage_assumption_bps / 10000);
+    
+    const totalCostRate = exchangeFeePct + slippagePct;
 
-    // 1. Cost Paid = Stake
-    const costPaid = stake;
+    // 3. Effective Entry Price (Price + Cost)
+    // If we buy at 0.60, effectively we pay 0.60 * (1 + fee) ? 
+    // Actually fee is taken from balance usually.
+    // For calculation, we assume we pay `stake` and get `stake * (1-fee)` worth of shares.
+    
+    const netStake = stake * (1 - totalCostRate);
+    const shares = netStake / entryProb;
 
-    // 2. Net Effective Stake (amount that actually buys shares)
-    // "Buy fee reduces effective stake"
-    const stakeNet = stake * (1 - buyFeePct);
+    // 4. EV Calculation
+    // Win: shares * $1.00
+    // Loss: 0
+    const grossPayout = shares * 1.0;
+    
+    // Note: Polymarket typically takes fee on Match. 
+    // Some structures take redemption fees. We assume 0 redemption fee for CTF here.
+    const netPayout = grossPayout; 
 
-    // 3. Shares bought
-    const shares = stakeNet / entryProb;
-
-    // 4. Gross Payout if Win
-    const grossPayout = shares * 1.0; // Pays out $1 per share
-
-    // 5. Net Payout after Sell Fee (simulating exit cost or settlement fee friction)
-    const netPayoutWin = grossPayout * (1 - sellFeePct);
-
-    // 6. EV Calculation
-    // EV = (ProbWin * PayoutWin) + (ProbLoss * PayoutLoss) - Cost
-    // PayoutLoss is 0.
-    const expectedReturn = confidence * netPayoutWin;
-    const ev = expectedReturn - costPaid;
-
-    // 7. Edge %
-    // Edge = EV / Cost
-    const edgePct = (ev / costPaid) * 100;
+    // EV = (WinProb * NetPayout) - Cost
+    const ev = (confidence * netPayout) - stake;
+    
+    // Edge = EV / Stake
+    const edgePct = (ev / stake) * 100;
 
     return {
-      buyFeePct,
-      sellFeePct,
+      feePct: exchangeFeePct,
+      slippagePct,
       evUsd: ev,
       edgePct,
-      breakEvenProb: costPaid / (1 * (1 - buyFeePct) * (1 - sellFeePct)) // Approx BE
+      // The probability at which EV is 0
+      breakEvenProb: stake / (netPayout / confidence) // Approx
     };
   }
 }
