@@ -1,19 +1,20 @@
 
 import React, { useState, useEffect } from 'react';
 import { 
-  Play, Square, Activity, Shield, 
-  Terminal, RefreshCcw, Save,
-  Info, LayoutDashboard, LineChart
+  Play, Square, Shield, LayoutDashboard, LineChart, 
+  BarChart2, Wallet, Microscope, Settings, Save, RotateCcw 
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
-import { ResultsView } from './ResultsView';
 
-// --- SUPABASE CLIENT ---
+// Sub-Views
+import { MarketsView } from './MarketsView';
+import { BankrollView } from './BankrollView';
+import { ResearchView } from './ResearchView';
+
 const SUPABASE_URL = 'https://bnobbksmuhhnikjprems.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJub2Jia3NtdWhobmlranByZW1zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc4MTIzNjUsImV4cCI6MjA4MzM4ODM2NX0.hVIHTZ-dEaa1KDlm1X5SqolsxW87ehYQcPibLWmnCWg';
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// --- TYPES ---
 interface ActiveMarket {
     id: string;
     polymarket_market_id: string;
@@ -22,41 +23,31 @@ interface ActiveMarket {
     baseline_price?: number;
 }
 
-interface GlobalConfig {
-    maxExposure: number;
-}
-
-interface BotHeartbeat {
-    last_seen: string;
-    status: string;
-}
-
 interface MarketState {
     confidence: number;
     delta: number;
     exposure: number;
     spot_price_median: number;
-    chainlink_price: number;
     status: string;
 }
 
 export const Dashboard: React.FC = () => {
   // Navigation State
-  const [activeTab, setActiveTab] = useState<'COMMAND' | 'RESULTS'>('COMMAND');
+  const [activeTab, setActiveTab] = useState<'COMMAND' | 'MARKETS' | 'BANKROLL' | 'RESEARCH'>('COMMAND');
+  const [showSettings, setShowSettings] = useState(false);
 
   // Core State
   const [activeMarket, setActiveMarket] = useState<ActiveMarket | null>(null);
   const [marketState, setMarketState] = useState<MarketState | null>(null);
-  const [config, setConfig] = useState<GlobalConfig>({ maxExposure: 100 });
   
+  // Controls
   const [botStatus, setBotStatus] = useState<'running' | 'stopped'>('stopped');
-  const [heartbeat, setHeartbeat] = useState<BotHeartbeat | null>(null);
+  const [config, setConfig] = useState({ maxExposure: 100, bankroll: 500 });
   const [isSaving, setIsSaving] = useState(false);
-  const [lastLog, setLastLog] = useState<string>('');
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 2000); // 2s Poll
+    const interval = setInterval(fetchData, 2000); 
     return () => clearInterval(interval);
   }, []);
 
@@ -74,18 +65,6 @@ export const Dashboard: React.FC = () => {
           setActiveMarket(null);
           setMarketState(null);
       }
-
-      const { data: run } = await supabase.from('test_runs').select('params').eq('name', 'AUTO_TRADER_GLOBAL_CONFIG').maybeSingle();
-      if (run && run.params && !isSaving) { 
-         const dbExposure = run.params.maxExposure;
-         if (dbExposure !== undefined) setConfig({ maxExposure: dbExposure });
-      }
-
-      const { data: hb } = await supabase.from('bot_heartbeats').select('*').order('last_seen', {ascending: false}).limit(1).maybeSingle();
-      if (hb) setHeartbeat(hb);
-      
-      const { data: logs } = await supabase.from('trade_events').select('asset, side, status, created_at').order('created_at', {ascending: false}).limit(1).maybeSingle();
-      if (logs) setLastLog(`${new Date(logs.created_at).toLocaleTimeString()}: ${logs.status} ${logs.side} on ${logs.asset}`);
   };
 
   const toggleBot = async () => {
@@ -96,22 +75,37 @@ export const Dashboard: React.FC = () => {
 
   const saveConfig = async () => {
       setIsSaving(true);
-      const { error } = await supabase.from('test_runs')
-        .update({ params: { maxExposure: config.maxExposure } })
+      // Update persistent run config
+      await supabase.from('test_runs')
+        .update({ 
+            params: { 
+                maxExposure: config.maxExposure,
+                startingBankroll: config.bankroll 
+            } 
+        })
         .eq('name', 'AUTO_TRADER_GLOBAL_CONFIG');
-      if (error) alert("Failed to save risk config");
+      
+      // Update global control timestamp to force bot reload
       await supabase.from('bot_control').update({ updated_at: new Date().toISOString() }).eq('id', 1);
-      setTimeout(() => setIsSaving(false), 1000);
+      
+      setTimeout(() => { setIsSaving(false); setShowSettings(false); }, 1000);
   };
 
-  const handleManualRotation = async () => {
-      if (!confirm("Force Market Rotation? This will disable current market and trigger discovery.")) return;
-      await supabase.from('markets').update({ enabled: false });
-      alert("Rotation Triggered.");
+  const resetPaper = async () => {
+      if(!confirm("Resetting will wipe recent ticks and start a fresh simulated run. Continue?")) return;
+      // In a real app this might archive data. For MVP we just update the run timestamp to force clean slate.
+      await supabase.from('test_runs').update({ 
+          status: 'COMPLETED' 
+      }).eq('name', 'AUTO_TRADER_GLOBAL_CONFIG');
+      
+      // Create new
+      await supabase.from('test_runs').insert({
+           name: 'AUTO_TRADER_GLOBAL_CONFIG',
+           status: 'RUNNING',
+           params: { maxExposure: config.maxExposure }
+      });
+      alert("Paper environment reset.");
   };
-
-  const isBotAlive = heartbeat && (Date.now() - new Date(heartbeat.last_seen).getTime() < 30000);
-  const timeToExpiry = activeMarket?.t_expiry ? Math.max(0, (new Date(activeMarket.t_expiry).getTime() - Date.now()) / 60000) : 0;
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-300 font-sans p-6 selection:bg-emerald-900 selection:text-white">
@@ -121,191 +115,172 @@ export const Dashboard: React.FC = () => {
         <div>
            <h1 className="text-3xl font-mono font-bold text-white flex items-center gap-3">
              <Shield className="text-emerald-500" /> 
-             POLYMARKET AUTOPILOT <span className="text-xs bg-zinc-900 text-zinc-500 px-2 py-1 rounded border border-zinc-800">BTC-15M-ONLY</span>
+             POLYMARKET AUTOPILOT <span className="text-xs bg-zinc-900 text-zinc-500 px-2 py-1 rounded border border-zinc-800">BTC-15M</span>
            </h1>
-           <p className="text-zinc-500 mt-2 font-mono text-sm">Autonomous High-Frequency Arbitrage System</p>
            
-           {/* TAB NAVIGATION */}
-           <div className="flex gap-4 mt-6">
-               <button 
-                onClick={() => setActiveTab('COMMAND')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'COMMAND' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
-               >
-                   <LayoutDashboard size={16} /> COMMAND CENTER
-               </button>
-               <button 
-                onClick={() => setActiveTab('RESULTS')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'RESULTS' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
-               >
-                   <LineChart size={16} /> PERFORMANCE
-               </button>
+           {/* MAIN NAV */}
+           <div className="flex gap-2 mt-6">
+               <NavButton active={activeTab === 'COMMAND'} onClick={() => setActiveTab('COMMAND')} icon={<LayoutDashboard size={16} />} label="COMMAND" />
+               <NavButton active={activeTab === 'MARKETS'} onClick={() => setActiveTab('MARKETS')} icon={<BarChart2 size={16} />} label="MARKETS" />
+               <NavButton active={activeTab === 'BANKROLL'} onClick={() => setActiveTab('BANKROLL')} icon={<Wallet size={16} />} label="BANKROLL" />
+               <NavButton active={activeTab === 'RESEARCH'} onClick={() => setActiveTab('RESEARCH')} icon={<Microscope size={16} />} label="RESEARCH" />
            </div>
         </div>
         
-        <div className="flex items-center gap-6 mt-2">
-            <div className="text-right hidden md:block">
-                <div className="text-xs font-bold text-zinc-500 uppercase">System Status</div>
-                <div className="flex items-center justify-end gap-2">
-                    <span className={`w-2 h-2 rounded-full ${isBotAlive ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`}></span>
-                    <span className={`font-mono font-bold ${isBotAlive ? 'text-emerald-500' : 'text-red-500'}`}>
-                        {isBotAlive ? 'ONLINE' : 'OFFLINE'}
-                    </span>
-                </div>
-            </div>
+        <div className="flex items-center gap-4 mt-2">
+            <button 
+                onClick={() => setShowSettings(!showSettings)}
+                className="p-3 rounded-lg bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-400 transition-colors"
+            >
+                <Settings size={20} />
+            </button>
             
             <button 
                 onClick={toggleBot}
-                className={`px-8 py-4 rounded-lg font-bold text-lg flex items-center gap-3 transition-all shadow-xl ${
+                className={`px-8 py-3 rounded-lg font-bold text-lg flex items-center gap-3 transition-all shadow-xl ${
                     botStatus === 'running' 
-                    ? 'bg-red-500/10 text-red-500 border border-red-500/50 hover:bg-red-500/20 shadow-red-900/20' 
-                    : 'bg-emerald-500 text-black hover:bg-emerald-400 shadow-emerald-900/20 hover:scale-105'
+                    ? 'bg-red-500/10 text-red-500 border border-red-500/50 hover:bg-red-500/20' 
+                    : 'bg-emerald-500 text-black hover:bg-emerald-400'
                 }`}
             >
-                {botStatus === 'running' ? <Square fill="currentColor" /> : <Play fill="currentColor" />}
+                {botStatus === 'running' ? <Square fill="currentColor" size={16} /> : <Play fill="currentColor" size={16} />}
                 {botStatus === 'running' ? 'STOP BOT' : 'START BOT'}
             </button>
         </div>
       </div>
 
-      {/* VIEW SWITCHER */}
-      {activeTab === 'RESULTS' ? (
-          <ResultsView />
-      ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in duration-300">
-            {/* LEFT COL: ACTIVE MARKET INTEL */}
-            <div className="lg:col-span-2 space-y-6">
-                
-                {/* ACTIVE MARKET CARD */}
-                <div className="bg-black border border-zinc-800 rounded-xl overflow-hidden relative">
-                    <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500 to-blue-500 opacity-50"></div>
-                    
-                    <div className="p-6">
-                        <div className="flex justify-between items-start mb-6">
-                            <div>
-                                <h2 className="text-zinc-500 font-bold text-xs uppercase tracking-widest mb-1">CURRENTLY TRADING</h2>
-                                {activeMarket ? (
-                                    <div className="text-2xl font-bold text-white font-mono break-all">
-                                        {activeMarket.polymarket_market_id}
-                                    </div>
-                                ) : (
-                                    <div className="text-xl text-zinc-600 font-mono italic">
-                                        Scanning for active BTC markets...
-                                    </div>
-                                )}
-                            </div>
-                            {activeMarket && (
-                                <div className="text-right">
-                                    <div className="text-zinc-500 text-xs uppercase">Expires In</div>
-                                    <div className={`text-3xl font-mono font-bold ${timeToExpiry < 5 ? 'text-red-500 animate-pulse' : 'text-emerald-400'}`}>
-                                        {timeToExpiry.toFixed(1)}m
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-
-                        {activeMarket && marketState && (
-                            <div className="grid grid-cols-4 gap-4 bg-zinc-900/30 p-4 rounded-lg border border-zinc-800">
-                                <div>
-                                    <div className="text-[10px] text-zinc-500 uppercase">Spot Price</div>
-                                    <div className="text-lg font-mono text-white">${marketState.spot_price_median.toFixed(2)}</div>
-                                </div>
-                                <div>
-                                    <div className="text-[10px] text-zinc-500 uppercase">Baseline</div>
-                                    <div className="text-lg font-mono text-zinc-400">${activeMarket.baseline_price?.toFixed(2) || '---'}</div>
-                                </div>
-                                <div>
-                                    <div className="text-[10px] text-zinc-500 uppercase">Delta</div>
-                                    <div className={`text-lg font-mono font-bold ${marketState.delta > 0 ? 'text-emerald-500' : 'text-red-500'}`}>
-                                        {marketState.delta > 0 ? '+' : ''}{marketState.delta.toFixed(2)}
-                                    </div>
-                                </div>
-                                <div>
-                                    <div className="text-[10px] text-zinc-500 uppercase">Confidence</div>
-                                    <div className="text-lg font-mono font-bold text-blue-400">{(marketState.confidence * 100).toFixed(0)}%</div>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                    
-                    <div className="bg-zinc-900 px-6 py-3 border-t border-zinc-800 flex justify-between items-center">
-                        <div className="flex items-center gap-2 text-xs text-zinc-500">
-                            <Activity size={14} />
-                            Last Activity: <span className="text-zinc-300 font-mono">{lastLog || 'Waiting...'}</span>
-                        </div>
-                        <button onClick={handleManualRotation} className="text-xs text-zinc-600 hover:text-white flex items-center gap-1">
-                            <RefreshCcw size={12} /> Force Rotate
-                        </button>
-                    </div>
-                </div>
-
-                {/* TERMINAL */}
-                <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-6 min-h-[300px]">
-                    <h3 className="text-sm font-bold text-zinc-400 uppercase mb-4 flex items-center gap-2">
-                        <Terminal size={16} /> Live Execution Stream
-                    </h3>
-                    <div className="font-mono text-xs space-y-2 text-zinc-400">
-                        {activeMarket ? (
-                            <>
-                            <div className="text-emerald-500">{'>'} [AUTO] Locked on market: {activeMarket.polymarket_market_id.substring(0, 40)}...</div>
-                            <div>{'>'} [EDGE] Monitoring volatility... Regime: {marketState?.status || 'WATCHING'}</div>
-                            {marketState && marketState.exposure > 0 && (
-                                <div className="text-yellow-500">{'>'} [RISK] Current Exposure: ${marketState.exposure.toFixed(2)}</div>
-                            )}
-                            <div className="opacity-50">{'>'} Waiting for signal...</div>
-                            </>
-                        ) : (
-                            <div className="text-zinc-600 animate-pulse">{'>'} system_idle: waiting for market discovery...</div>
-                        )}
-                    </div>
-                </div>
-
-            </div>
-
-            {/* RIGHT COL: RISK CONTROL */}
-            <div className="space-y-6">
-                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 shadow-lg">
-                    <div className="flex justify-between items-center mb-6">
-                        <h3 className="text-sm font-bold text-white uppercase flex items-center gap-2">
-                            <Shield size={16} className="text-emerald-500" /> Risk Control
-                        </h3>
-                        <button 
-                            onClick={saveConfig}
-                            disabled={isSaving}
-                            className="text-xs bg-emerald-900/30 text-emerald-500 border border-emerald-900 hover:bg-emerald-900/50 px-3 py-1 rounded transition-colors flex items-center gap-1"
-                        >
-                            {isSaving ? 'SAVING...' : <><Save size={12} /> UPDATE LIMITS</>}
-                        </button>
-                    </div>
-
-                    <div className="space-y-6">
-                        <div>
-                            <label className="text-xs text-zinc-500 font-bold uppercase mb-2 block flex justify-between">
-                                <span>Maximum Capital Exposure</span>
-                                <span className="text-white text-lg">${config.maxExposure}</span>
-                            </label>
-                            <input 
-                                type="range" min="50" max="2000" step="50"
-                                value={config.maxExposure}
-                                onChange={(e) => setConfig({ maxExposure: parseFloat(e.target.value) })}
-                                className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
-                            />
-                            <div className="flex justify-between text-[10px] text-zinc-600 font-mono mt-2">
-                                <span>$50</span>
-                                <span>$2000</span>
-                            </div>
-                        </div>
-
-                        <div className="flex items-start gap-3 bg-zinc-950/50 p-4 rounded border border-zinc-800">
-                            <Info size={16} className="text-zinc-500 mt-0.5" />
-                            <p className="text-xs text-zinc-400 leading-relaxed">
-                                This is a hard risk limit. The autonomous agent will manage trade sizing and frequency internally, but will <strong>never</strong> exceed ${config.maxExposure} in total allocation.
-                            </p>
-                        </div>
-                    </div>
-                </div>
-            </div>
+      {/* SETTINGS DRAWER */}
+      {showSettings && (
+          <div className="mb-8 bg-zinc-900/50 border border-zinc-800 rounded-xl p-6 animate-in slide-in-from-top-4">
+              <h3 className="text-sm font-bold text-white uppercase mb-4 flex items-center gap-2">
+                  <Settings size={16} /> Global Configuration
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div>
+                      <label className="text-xs text-zinc-500 font-bold uppercase block mb-2">Max Capital Exposure ($)</label>
+                      <input 
+                        type="number" 
+                        value={config.maxExposure}
+                        onChange={(e) => setConfig({...config, maxExposure: parseFloat(e.target.value)})}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded p-2 text-white font-mono"
+                      />
+                  </div>
+                  <div>
+                      <label className="text-xs text-zinc-500 font-bold uppercase block mb-2">Bankroll Reset ($)</label>
+                      <input 
+                        type="number" 
+                        value={config.bankroll}
+                        onChange={(e) => setConfig({...config, bankroll: parseFloat(e.target.value)})}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded p-2 text-white font-mono"
+                      />
+                  </div>
+                  <div className="flex items-end gap-2">
+                      <button 
+                        onClick={saveConfig}
+                        disabled={isSaving}
+                        className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 rounded flex items-center justify-center gap-2"
+                      >
+                          <Save size={16} /> {isSaving ? 'Saving...' : 'Apply Config'}
+                      </button>
+                      <button 
+                        onClick={resetPaper}
+                        className="px-4 bg-zinc-800 hover:bg-red-900/30 text-zinc-400 hover:text-red-500 border border-zinc-700 hover:border-red-800 font-bold py-2 rounded flex items-center justify-center gap-2"
+                        title="Reset Paper Trading Data"
+                      >
+                          <RotateCcw size={16} />
+                      </button>
+                  </div>
+              </div>
           </div>
       )}
+
+      {/* CONTENT AREA */}
+      <div className="min-h-[500px]">
+          {activeTab === 'COMMAND' && (
+              <CommandView activeMarket={activeMarket} marketState={marketState} />
+          )}
+          {activeTab === 'MARKETS' && <MarketsView />}
+          {activeTab === 'BANKROLL' && <BankrollView />}
+          {activeTab === 'RESEARCH' && <ResearchView />}
+      </div>
     </div>
   );
+};
+
+const NavButton = ({ active, onClick, icon, label }: any) => (
+    <button 
+        onClick={onClick}
+        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+            active 
+            ? 'bg-zinc-800 text-white shadow-lg ring-1 ring-zinc-700' 
+            : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900'
+        }`}
+    >
+        {icon} {label}
+    </button>
+);
+
+// --- REFACTORED COMMAND VIEW (Legacy Dashboard Content) ---
+const CommandView = ({ activeMarket, marketState }: any) => {
+    return (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in duration-300">
+            {/* Active Market Card */}
+            <div className="bg-black border border-zinc-800 rounded-xl overflow-hidden relative min-h-[300px]">
+                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500 to-blue-500 opacity-50"></div>
+                <div className="p-6">
+                    <div className="flex justify-between items-start mb-6">
+                        <div>
+                            <h2 className="text-zinc-500 font-bold text-xs uppercase tracking-widest mb-1">CURRENTLY TRADING</h2>
+                            {activeMarket ? (
+                                <div className="text-2xl font-bold text-white font-mono break-all">
+                                    {activeMarket.polymarket_market_id}
+                                </div>
+                            ) : (
+                                <div className="text-xl text-zinc-600 font-mono italic">
+                                    Scanning for active BTC markets...
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {activeMarket && marketState && (
+                        <div className="grid grid-cols-2 gap-4 mt-8">
+                            <div className="bg-zinc-900/50 p-4 rounded border border-zinc-800">
+                                <div className="text-[10px] text-zinc-500 uppercase font-bold">Spot Price</div>
+                                <div className="text-2xl font-mono text-white">${marketState.spot_price_median.toFixed(2)}</div>
+                            </div>
+                            <div className="bg-zinc-900/50 p-4 rounded border border-zinc-800">
+                                <div className="text-[10px] text-zinc-500 uppercase font-bold">Delta</div>
+                                <div className={`text-2xl font-mono font-bold ${marketState.delta > 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                                    {marketState.delta > 0 ? '+' : ''}{marketState.delta.toFixed(2)}
+                                </div>
+                            </div>
+                            <div className="bg-zinc-900/50 p-4 rounded border border-zinc-800">
+                                <div className="text-[10px] text-zinc-500 uppercase font-bold">Model Confidence</div>
+                                <div className="text-2xl font-mono font-bold text-blue-400">{(marketState.confidence * 100).toFixed(1)}%</div>
+                            </div>
+                            <div className="bg-zinc-900/50 p-4 rounded border border-zinc-800">
+                                <div className="text-[10px] text-zinc-500 uppercase font-bold">Current Exposure</div>
+                                <div className="text-2xl font-mono font-bold text-yellow-500">${marketState.exposure.toFixed(2)}</div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Live Feed Placeholder */}
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
+                <h3 className="text-sm font-bold text-zinc-400 uppercase mb-4 flex items-center gap-2">
+                    <LineChart size={16} /> Live Strategy Feed
+                </h3>
+                <div className="font-mono text-xs space-y-2 text-zinc-500">
+                    <div>{'>'} System initialized...</div>
+                    <div>{'>'} Waiting for next tick...</div>
+                    {activeMarket && (
+                        <div className="text-emerald-500">{'>'} Market Active: {activeMarket.polymarket_market_id}</div>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
 };
