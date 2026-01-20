@@ -31,6 +31,7 @@ interface BankrollRow {
 export const Dashboard: React.FC = () => {
   const [ticks, setTicks] = useState<Tick[]>([]);
   const [bankroll, setBankroll] = useState<BankrollRow | null>(null);
+  const [connected, setConnected] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -39,25 +40,42 @@ export const Dashboard: React.FC = () => {
   }, []);
 
   async function loadData() {
-    const { data: t } = await supabase
-      .from('bot_ticks')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(50);
+    try {
+      // --- LOAD TICKS ---
+      const { data: t, error: e1 } = await supabase
+        .from('bot_ticks')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(50);
 
-    if (t) setTicks(t);
+      if (e1) {
+        console.error("ticks error", e1);
+        setConnected(false);
+        return;
+      }
 
-    const { data: b } = await supabase
-      .from('bot_bankroll')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
+      setTicks(t || []);
+      setConnected(true);
 
-    if (b) setBankroll(b);
+      // --- LOAD BANKROLL ---
+      const { data: b, error: e2 } = await supabase
+        .from('bot_bankroll')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!e2 && b) {
+        setBankroll(b);
+      }
+
+    } catch (err) {
+      console.error("dashboard load failed", err);
+      setConnected(false);
+    }
   }
 
-  const latest = ticks[0];
+  const latest = ticks.length > 0 ? ticks[0] : null;
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-300 p-6">
@@ -65,13 +83,18 @@ export const Dashboard: React.FC = () => {
       <h1 className="text-2xl font-mono text-white flex items-center gap-2 mb-6">
         <Shield className="text-emerald-500" />
         LIVE BOT TELEMETRY
+        <span className={`ml-4 text-xs px-2 py-1 rounded ${
+          connected ? 'bg-emerald-900 text-emerald-200' : 'bg-red-900 text-red-200'
+        }`}>
+          {connected ? "CONNECTED" : "DISCONNECTED"}
+        </span>
       </h1>
 
       {/* BANKROLL */}
       <div className="grid grid-cols-3 gap-4 mb-6">
-        <Card label="Bankroll" value={bankroll?.bankroll.toFixed(2) ?? "--"} />
-        <Card label="Cap / Market" value={bankroll?.cap_per_market.toFixed(2) ?? "--"} />
-        <Card label="Exposure" value={bankroll?.exposure.toFixed(2) ?? "--"} />
+        <Card label="Bankroll" value={bankroll?.bankroll?.toFixed(2) ?? "--"} />
+        <Card label="Cap / Market" value={bankroll?.cap_per_market?.toFixed(2) ?? "--"} />
+        <Card label="Exposure" value={bankroll?.exposure?.toFixed(2) ?? "--"} />
       </div>
 
       {/* LATEST SIGNAL */}
@@ -88,36 +111,65 @@ export const Dashboard: React.FC = () => {
         </div>
       )}
 
-      {/* RAW TICKS */}
-      <div className="bg-black border border-zinc-800 rounded">
-        <table className="w-full text-xs font-mono">
-          <thead className="bg-zinc-900">
-            <tr>
-              <th className="p-2 text-left">time</th>
-              <th className="p-2 text-left">market</th>
-              <th className="p-2">yes</th>
-              <th className="p-2">no</th>
-              <th className="p-2">edge</th>
-              <th className="p-2">kelly</th>
-              <th className="p-2">size</th>
-            </tr>
-          </thead>
+      {/* EMPTY STATE */}
+      {ticks.length === 0 && (
+        <div className="bg-zinc-900 border border-zinc-800 rounded p-6 text-center text-zinc-500">
+          Waiting for telemetry from bot_ticks...
+        </div>
+      )}
 
-          <tbody>
-            {ticks.map((t, i) => (
-              <tr key={i} className="border-t border-zinc-800">
-                <td className="p-2">{new Date(t.created_at).toLocaleTimeString()}</td>
-                <td className="p-2">{t.slug}</td>
-                <td className="p-2 text-center">{t.yes_price}</td>
-                <td className="p-2 text-center">{t.no_price}</td>
-                <td className="p-2 text-center">{t.edge_after_fees.toFixed(4)}</td>
-                <td className="p-2 text-center">{t.kelly_fraction.toFixed(4)}</td>
-                <td className="p-2 text-center">{t.recommended_size.toFixed(2)}</td>
+      {/* RAW TICKS */}
+      {ticks.length > 0 && (
+        <div className="bg-black border border-zinc-800 rounded">
+          <table className="w-full text-xs font-mono">
+            <thead className="bg-zinc-900">
+              <tr>
+                <th className="p-2 text-left">time</th>
+                <th className="p-2 text-left">market</th>
+                <th className="p-2">yes</th>
+                <th className="p-2">no</th>
+                <th className="p-2">edge</th>
+                <th className="p-2">kelly</th>
+                <th className="p-2">size</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+
+            <tbody>
+              {ticks.map((t, i) => (
+                <tr key={i} className="border-t border-zinc-800">
+                  <td className="p-2">
+                    {new Date(t.created_at).toLocaleTimeString()}
+                  </td>
+
+                  <td className="p-2 truncate max-w-[220px]">
+                    {t.slug}
+                  </td>
+
+                  <td className="p-2 text-center">
+                    {t.yes_price}
+                  </td>
+
+                  <td className="p-2 text-center">
+                    {t.no_price}
+                  </td>
+
+                  <td className="p-2 text-center">
+                    {t.edge_after_fees.toFixed(4)}
+                  </td>
+
+                  <td className="p-2 text-center">
+                    {t.kelly_fraction.toFixed(4)}
+                  </td>
+
+                  <td className="p-2 text-center">
+                    {t.recommended_size.toFixed(2)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
     </div>
   );
