@@ -59,11 +59,10 @@ export const Dashboard: React.FC = () => {
 
       // --- LOAD BANKROLL ---
       const { data: b, error: e2 } = await supabase
-        .from('bot_bankroll')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .from('bot_bankroll_current')
+  .select('*')
+  .single();
+
 
       if (!e2 && b) {
         setBankroll(b);
