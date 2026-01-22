@@ -194,19 +194,18 @@ export const Dashboard: React.FC = () => {
   }, []);
 
   /* ---------- DERIVED METRICS ---------- */
-  const realizedPnl = useMemo(
-    () => settlements.reduce((a, s) => a + Number(s.pnl || 0), 0),
-    [settlements]
-  );
+const realizedPnl = useMemo(
+  () => settlements.reduce((a, s) => a + Number(s.pnl || 0), 0),
+  [settlements]
+);
 
-  // IMPORTANT:
-  // Your “exposure” is whatever the bot writes.
-  // In your current engine it’s “cost spent in open positions” (not mark-to-market).
-  const exposure = bankroll?.exposure ?? 0;
+// IMPORTANT: your engine currently writes `exposure` = OPEN POSITION COST (money spent),
+// NOT unrealized PnL.
+const openPositionCost = bankroll?.exposure ?? 0;
 
-  // “Net equity” shown as bankroll + exposure (your definition).
-  // If you want true equity, we need unrealized mark-to-market, not cost.
-  const netEquity = (bankroll?.bankroll ?? 0) + exposure;
+// Net equity is NOT bankroll + cost. Until we compute mark-to-market, equity = bankroll.
+const netEquity = bankroll?.bankroll ?? 0;
+
 
   const banner = useMemo(() => {
     const keyLooksPlaceholder =
