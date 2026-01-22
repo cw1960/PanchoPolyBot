@@ -299,11 +299,11 @@ const netEquity = bankroll?.bankroll ?? 0;
 
       {/* ================= METRICS ================= */}
       <div className="grid grid-cols-4 gap-4 mb-8">
-        <Metric label="Bankroll" value={bankroll ? bankroll.bankroll.toFixed(2) : "--"} />
-        <Metric label="Exposure (Unrealized*)" value={exposure.toFixed(2)} />
-        <Metric label="Realized PnL" value={realizedPnl.toFixed(2)} />
-        <Metric label="Net Equity" value={netEquity.toFixed(2)} />
-      </div>
+  <Metric label="Bankroll" value={bankroll ? bankroll.bankroll.toFixed(2) : "--"} />
+  <Metric label="Open Position Cost" value={openPositionCost.toFixed(2)} />
+  <Metric label="Realized PnL" value={realizedPnl.toFixed(2)} />
+  <Metric label="Net Equity" value={netEquity.toFixed(2)} />
+</div>
 
       <div className="text-[11px] text-zinc-500 mb-6">
         *Your current engine writes “exposure” as open-position cost (not mark-to-market).
