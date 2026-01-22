@@ -1,7 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import {
-  Shield
-} from 'lucide-react';
+import { Shield } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL = 'https://bnobbksmuhhnikjprems.supabase.co';
@@ -29,9 +27,18 @@ interface BankrollRow {
   created_at: string;
 }
 
+interface ResolvedMarket {
+  settled_at: string;
+  slug: string;
+  final_outcome: string;
+  pnl: number;
+  settlement_method: string;
+}
+
 export const Dashboard: React.FC = () => {
   const [ticks, setTicks] = useState<Tick[]>([]);
   const [bankroll, setBankroll] = useState<BankrollRow | null>(null);
+  const [resolved, setResolved] = useState<ResolvedMarket[]>([]);
   const [ticksConnected, setTicksConnected] = useState(false);
   const [bankrollConnected, setBankrollConnected] = useState(false);
 
@@ -58,8 +65,7 @@ export const Dashboard: React.FC = () => {
 
       setTicks(data || []);
       setTicksConnected(true);
-    } catch (err) {
-      console.error('ticks load failed', err);
+    } catch {
       setTicksConnected(false);
     }
   }
@@ -78,7 +84,6 @@ export const Dashboard: React.FC = () => {
         setBankroll(data);
         setBankrollConnected(true);
       } else {
-        console.error('bankroll load error', error);
         setBankrollConnected(false);
       }
 
@@ -107,6 +112,22 @@ export const Dashboard: React.FC = () => {
       if (channel) supabase.removeChannel(channel);
     };
   }, []);
+
+  /* -------------------- RESOLVED MARKETS (POLLING) -------------------- */
+  useEffect(() => {
+    loadResolved();
+    const i = setInterval(loadResolved, 5000);
+    return () => clearInterval(i);
+  }, []);
+
+  async function loadResolved() {
+    const { data } = await supabase
+      .from('bot_resolved_markets_recent')
+      .select('*')
+      .limit(50);
+
+    if (data) setResolved(data as ResolvedMarket[]);
+  }
 
   const connected = ticksConnected && bankrollConnected;
   const latest = ticks.length > 0 ? ticks[0] : null;
@@ -143,18 +164,51 @@ export const Dashboard: React.FC = () => {
 
       {/* BANKROLL */}
       <div className="grid grid-cols-3 gap-4 mb-6">
-        <Card
-          label="Bankroll"
-          value={bankroll ? bankroll.bankroll.toFixed(2) : '--'}
-        />
-        <Card
-          label="Cap / Market"
-          value={bankroll ? bankroll.cap_per_market.toFixed(2) : '--'}
-        />
-        <Card
-          label="Exposure"
-          value={bankroll ? bankroll.exposure.toFixed(2) : '--'}
-        />
+        <Card label="Bankroll" value={bankroll ? bankroll.bankroll.toFixed(2) : '--'} />
+        <Card label="Cap / Market" value={bankroll ? bankroll.cap_per_market.toFixed(2) : '--'} />
+        <Card label="Exposure" value={bankroll ? bankroll.exposure.toFixed(2) : '--'} />
+      </div>
+
+      {/* RESOLVED MARKETS */}
+      <div className="bg-black border border-zinc-800 rounded mb-6">
+        <div className="p-3 text-xs text-zinc-400 uppercase">
+          Resolved Markets
+        </div>
+        <div className="max-h-[300px] overflow-y-auto">
+          <table className="w-full text-xs font-mono">
+            <thead className="bg-zinc-900 sticky top-0">
+              <tr>
+                <th className="p-2 text-left">Settled</th>
+                <th className="p-2 text-left">Market</th>
+                <th className="p-2 text-center">Outcome</th>
+                <th className="p-2 text-center">PnL</th>
+                <th className="p-2 text-center">Method</th>
+              </tr>
+            </thead>
+            <tbody>
+              {resolved.map((r, i) => (
+                <tr key={i} className="border-t border-zinc-800">
+                  <td className="p-2">
+                    {new Date(r.settled_at).toLocaleTimeString()}
+                  </td>
+                  <td className="p-2 truncate max-w-[260px]">{r.slug}</td>
+                  <td className="p-2 text-center">{r.final_outcome}</td>
+                  <td className={`p-2 text-center ${r.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {r.pnl.toFixed(2)}
+                  </td>
+                  <td className="p-2 text-center">{r.settlement_method}</td>
+                </tr>
+              ))}
+              {resolved.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="p-4 text-center text-zinc-500">
+                    No markets resolved yet
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {/* ESTIMATED PNL */}
@@ -167,22 +221,12 @@ export const Dashboard: React.FC = () => {
           <div className="grid grid-cols-3 gap-4 mb-4">
             <Card label="Last Trade PnL $" value={lastPnl.toFixed(2)} />
             <Card label="Edge %" value={lastEdgePct.toFixed(3) + '%'} />
-            <Card
-              label="Kelly Size $"
-              value={latest.recommended_size.toFixed(2)}
-            />
+            <Card label="Kelly Size $" value={latest.recommended_size.toFixed(2)} />
           </div>
 
           <div className="font-mono text-sm text-emerald-400">
             Running estimate: {runningPnl.toFixed(2)}
           </div>
-        </div>
-      )}
-
-      {/* EMPTY STATE */}
-      {ticks.length === 0 && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded p-6 text-center text-zinc-500">
-          Waiting for telemetry from bot_ticks...
         </div>
       )}
 
