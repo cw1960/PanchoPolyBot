@@ -6,7 +6,7 @@ import { createClient } from '@supabase/supabase-js';
    SUPABASE CLIENT
 ========================= */
 const SUPABASE_URL = 'https://bnobbksmuhhnikjprems.supabase.co';
-const SUPABASE_ANON_KEY = 'YOUR_ANON_KEY_HERE';
+const SUPABASE_ANON_KEY = 'Step 2 — Replace EXACTLY this block';
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 /* =========================
