@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Shield, CheckCircle, AlertTriangle } from "luci:contentReference[oaicite:3]{index=3}ient } from "@supabase/supabase-js";
+import { Shield, CheckCircle, AlertTriangle } from "lucide-react";
+import { createClient } from "@supabase/supabase-js";
 
 /* =========================
   SUPABASE CLIENT
