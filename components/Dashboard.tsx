@@ -1,14 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Shield, CheckCircle, AlertTriangle } from "lucide-react";
-import { createClient } from "@supabase/supabase-js";
+import { Shield, CheckCircle, AlertTriangle } from "luci:contentReference[oaicite:3]{index=3}ient } from "@supabase/supabase-js";
 
 /* =========================
-   SUPABASE CLIENT
-   IMPORTANT:
-   - 401 means missing/invalid key.
-   - 403 means RLS/policy denies read.
+  SUPABASE CLIENT
+  IMPORTANT:
+  - 401 means missing/invalid key.
+  - 403 means RLS/policy denies read.
 ========================= */
 const SUPABASE_URL = "https://bnobbksmuhhnikjprems.supabase.co";
+
 // ✅ PUT YOUR REAL ANON KEY HERE (the long JWT string from Supabase settings)
 const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJub2Jia3Ntd" +
@@ -30,7 +30,7 @@ const resolvedKey =
 const supabase = createClient(resolvedUrl, resolvedKey);
 
 /* =========================
-   TYPES
+  TYPES
 ========================= */
 interface BankrollRow {
   bankroll: number;
@@ -39,7 +39,6 @@ interface BankrollRow {
   ts: string;
   run_id?: string;
 }
-
 interface SettlementRow {
   slug: string;
   final_outcome: string;
@@ -49,7 +48,6 @@ interface SettlementRow {
   evidence?: any;
   run_id?: string;
 }
-
 interface Tick {
   slug: string;
   yes_price: number;
@@ -60,51 +58,63 @@ interface Tick {
   created_at: string;
   run_id?: string;
 }
+interface ValuationRow {
+  slug: string;
+  ts: string;
+  ts_bucket: number;
+  unrealized_pnl: number;
+  liquidation_value_net: number;
+  pricing_quality: string;
+  yes_bid_missing: boolean;
+  no_bid_missing: boolean;
+  run_id?: string;
+}
 
 /* =========================
-   DASHBOARD
+  DASHBOARD
 ========================= */
 export const Dashboard: React.FC = () => {
   const [bankroll, setBankroll] = useState<BankrollRow | null>(null);
   const [settlements, setSettlements] = useState<SettlementRow[]>([]);
   const [ticks, setTicks] = useState<Tick[]>([]);
+  const [valuations, setValuations] = useState<ValuationRow[]>([]);
 
-  // NEW: active run id (run isolation)
+  // NEW: active run_id
   const [runId, setRunId] = useState<string | null>(null);
-  const [errRun, setErrRun] = useState<string | null>(null);
 
   // Connection / debugging truth (so you’re not guessing)
+  const [errRun, setErrRun] = useState<string | null>(null);
   const [errBankroll, setErrBankroll] = useState<string | null>(null);
   const [errSettlements, setErrSettlements] = useState<string | null>(null);
   const [errTicks, setErrTicks] = useState<string | null>(null);
+  const [errValuations, setErrValuations] = useState<string | null>(null);
 
   const connected = useMemo(() => {
-    // “Connected” means: we are successfully reading at least ticks,
-    // and we have a valid key (not placeholder).
     const keyLooksReal =
       typeof resolvedKey === "string" &&
       resolvedKey.length > 50 &&
       !resolvedKey.includes("PASTE_YOUR_REAL_ANON_KEY_HERE") &&
       !resolvedKey.includes("YOUR_ANON_KEY_HERE");
 
-    const no401 =
-      !(errTicks || "").includes("401") &&
-      !(errBankroll || "").includes("401") &&
-      !(errSettlements || "").includes("401") &&
-      !(errRun || "").includes("401");
+    const any401 =
+      (errRun || "").includes("401") ||
+      (errTicks || "").includes("401") ||
+      (errBankroll || "").includes("401") ||
+      (errSettlements || "").includes("401") ||
+      (errValuations || "").includes("401");
 
-    return keyLooksReal && no401;
-  }, [errBankroll, errSettlements, errTicks, errRun]);
+    return keyLooksReal && !any401;
+  }, [errRun, errBankroll, errSettlements, errTicks, errValuations]);
 
-  /* ---------- ACTIVE RUN (RUN ISOLATION) ---------- */
+  // NEW: load active RUNNING run_id (latest)
   useEffect(() => {
     let stop = false;
 
-    async function loadRunId() {
+    async function loadRun() {
       try {
         const { data, error } = await supabase
           .from("bot_runs")
-          .select("run_id, status, created_at")
+          .select("run_id,status,created_at")
           .eq("status", "RUNNING")
           .order("created_at", { ascending: false })
           .limit(1)
@@ -127,22 +137,20 @@ export const Dashboard: React.FC = () => {
       }
     }
 
-    loadRunId();
-    const i = setInterval(loadRunId, 5000);
+    loadRun();
+    const i = setInterval(loadRun, 5000);
     return () => {
       stop = true;
       clearInterval(i);
     };
   }, []);
 
-  /* ---------- BANKROLL (LIVE SNAPSHOT) ---------- */
+  // Bankroll (run-scoped)
   useEffect(() => {
     let stop = false;
-
     async function loadBankroll() {
       try {
         if (!runId) {
-          // No run means we cannot scope queries correctly.
           setBankroll(null);
           return;
         }
@@ -178,10 +186,9 @@ export const Dashboard: React.FC = () => {
     };
   }, [runId]);
 
-  /* ---------- SETTLEMENTS (REALIZED PNL) ---------- */
+  // Settlements (run-scoped)
   useEffect(() => {
     let stop = false;
-
     async function loadSettlements() {
       try {
         if (!runId) {
@@ -194,7 +201,7 @@ export const Dashboard: React.FC = () => {
           .select("*")
           .eq("run_id", runId)
           .order("settled_at", { ascending: false })
-          .limit(20);
+          .limit(50);
 
         if (stop) return;
 
@@ -221,10 +228,9 @@ export const Dashboard: React.FC = () => {
     };
   }, [runId]);
 
-  /* ---------- TICKS (RAW TELEMETRY) ---------- */
+  // Ticks (run-scoped)
   useEffect(() => {
     let stop = false;
-
     async function loadTicks() {
       try {
         if (!runId) {
@@ -262,23 +268,72 @@ export const Dashboard: React.FC = () => {
     };
   }, [runId]);
 
-  /* ---------- DERIVED METRICS ---------- */
+  // NEW: valuations (run-scoped)
+  useEffect(() => {
+    let stop = false;
+    async function loadValuations() {
+      try {
+        if (!runId) {
+          setValuations([]);
+          return;
+        }
+
+        const { data, error } = await supabase
+          .from("bot_unrealized_valuations")
+          .select("slug,ts,ts_bucket,unrealized_pnl,liquidation_value_net,pricing_quality,yes_bid_missing,no_bid_missing,run_id")
+          .eq("run_id", runId)
+          .order("ts", { ascending: false })
+          .limit(500);
+
+        if (stop) return;
+
+        if (error) {
+          setErrValuations(formatSbError("bot_unrealized_valuations", error));
+          return;
+        }
+
+        setErrValuations(null);
+        setValuations((data || []) as any);
+      } catch (e: any) {
+        if (stop) return;
+        setErrValuations(
+          `bot_unrealized_valuations unexpected: ${String(e?.message ?? e)}`
+        );
+      }
+    }
+
+    loadValuations();
+    const i = setInterval(loadValuations, 3000);
+    return () => {
+      stop = true;
+      clearInterval(i);
+    };
+  }, [runId]);
+
   const realizedPnl = useMemo(
     () => settlements.reduce((a, s) => a + Number(s.pnl || 0), 0),
     [settlements]
   );
 
-  // NEW: Estimated Return (sum of expected_pnl over the currently loaded ticks)
   const estimatedReturn = useMemo(() => {
     return ticks.reduce((a, t) => a + Number(t.expected_pnl || 0), 0);
   }, [ticks]);
 
-  // IMPORTANT: your engine currently writes `exposure` = OPEN POSITION COST (money spent),
-  // NOT unrealized PnL.
+  // Compute latest valuation per slug (client-side)
+  const totalUnrealizedPnl = useMemo(() => {
+    const latestBySlug = new Map<string, ValuationRow>();
+    for (const v of valuations) {
+      if (!latestBySlug.has(v.slug)) latestBySlug.set(v.slug, v);
+    }
+    let sum = 0;
+    for (const v of latestBySlug.values()) sum += Number(v.unrealized_pnl || 0);
+    return sum;
+  }, [valuations]);
+
   const openPositionCost = bankroll?.exposure ?? 0;
 
-  // Net equity is NOT bankroll + cost. Until we compute mark-to-market, equity = bankroll.
-  const netEquity = bankroll?.bankroll ?? 0;
+  // NEW: Net Equity = bankroll (cash proxy in your engine) + unrealizedPnL estimator
+  const netEquity = (bankroll?.bankroll ?? 0) + totalUnrealizedPnl;
 
   const banner = useMemo(() => {
     const keyLooksPlaceholder =
@@ -293,10 +348,11 @@ export const Dashboard: React.FC = () => {
     }
 
     const any401 =
+      (errRun || "").includes("401") ||
       (errTicks || "").includes("401") ||
       (errBankroll || "").includes("401") ||
       (errSettlements || "").includes("401") ||
-      (errRun || "").includes("401");
+      (errValuations || "").includes("401");
 
     if (any401) {
       return {
@@ -307,32 +363,17 @@ export const Dashboard: React.FC = () => {
     }
 
     const any403 =
+      (errRun || "").includes("403") ||
       (errTicks || "").includes("403") ||
       (errBankroll || "").includes("403") ||
       (errSettlements || "").includes("403") ||
-      (errRun || "").includes("403");
+      (errValuations || "").includes("403");
 
     if (any403) {
       return {
         kind: "warn" as const,
         text:
           "Supabase is returning 403 (forbidden). This is RLS/policy. The key is valid but reads are blocked.",
-      };
-    }
-
-    if (errRun) {
-      return {
-        kind: "warn" as const,
-        text:
-          "Dashboard cannot resolve active RUNNING run_id from bot_runs. Telemetry is run-scoped now, so metrics will remain empty until a RUNNING run exists.",
-      };
-    }
-
-    if (errTicks || errBankroll || errSettlements) {
-      return {
-        kind: "warn" as const,
-        text:
-          "Dashboard is running but at least one query is failing. Scroll down to see exact errors.",
       };
     }
 
@@ -344,8 +385,16 @@ export const Dashboard: React.FC = () => {
       };
     }
 
+    if (errRun || errTicks || errBankroll || errSettlements || errValuations) {
+      return {
+        kind: "warn" as const,
+        text:
+          "Dashboard is running but at least one query is failing. Scroll down to see exact errors.",
+      };
+    }
+
     return { kind: "ok" as const, text: "Supabase reads OK." };
-  }, [errBankroll, errSettlements, errTicks, errRun, runId]);
+  }, [errRun, errBankroll, errSettlements, errTicks, errValuations, runId]);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-200 p-6">
@@ -365,7 +414,7 @@ export const Dashboard: React.FC = () => {
         </span>
       </div>
 
-      {/* STATUS BANNER (THIS IS THE “NO GUESSING” PART) */}
+      {/* STATUS BANNER */}
       <div
         className={`mb-6 rounded border p-3 text-sm ${
           banner.kind === "ok"
@@ -402,8 +451,7 @@ export const Dashboard: React.FC = () => {
       </div>
 
       <div className="text-[11px] text-zinc-500 mb-6">
-        *Your current engine writes “exposure” as open-position cost (not mark-to-market).
-        If you want true unrealized PnL, we’ll compute it from live prices later.
+        Unrealized PnL estimator: conservative bid-side liquidation value minus fee-equivalent taker fee estimate (15m crypto).
       </div>
 
       {/* ================= SETTLED MARKETS ================= */}
@@ -447,7 +495,7 @@ export const Dashboard: React.FC = () => {
               {settlements.length === 0 && (
                 <tr>
                   <td colSpan={5} className="p-4 text-center text-zinc-500">
-                    No markets settled yet (this means bot_settlements has 0 rows)
+                    No markets settled yet
                   </td>
                 </tr>
               )}
@@ -495,11 +543,58 @@ export const Dashboard: React.FC = () => {
         </table>
       </div>
 
-      {/* ================= BANKROLL DEBUG ================= */}
+      {/* ================= UNREALIZED VALUATIONS ================= */}
+      <div className="bg-black border border-zinc-800 rounded p-4 mt-8">
+        <h2 className="text-xs text-zinc-500 mb-2">
+          Unrealized Valuations (latest by slug)
+        </h2>
+        {errValuations && (
+          <ErrorBox title="bot_unrealized_valuations error" text={errValuations} />
+        )}
+        <div className="max-h-64 overflow-y-auto">
+          <table className="w-full text-xs font-mono">
+            <thead className="bg-zinc-900 sticky top-0">
+              <tr>
+                <th className="p-2 text-left">time</th>
+                <th className="p-2 text-left">market</th>
+                <th className="p-2">uPnL</th>
+                <th className="p-2">quality</th>
+              </tr>
+            </thead>
+            <tbody>
+              {valuations.slice(0, 20).map((v, i) => (
+                <tr key={i} className="border-t border-zinc-800">
+                  <td className="p-2">
+                    {new Date(v.ts).toLocaleTimeString()}
+                  </td>
+                  <td className="p-2 truncate max-w-[320px]">{v.slug}</td>
+                  <td
+                    className={`p-2 text-center ${
+                      Number(v.unrealized_pnl) >= 0 ? "text-emerald-400" : "text-red-400"
+                    }`}
+                  >
+                    {Number(v.unrealized_pnl).toFixed(4)}
+                  </td>
+                  <td className="p-2 text-center">{v.pricing_quality}</td>
+                </tr>
+              ))}
+              {valuations.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="p-4 text-center text-zinc-500">
+                    No valuation rows yet
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ================= DEBUG ================= */}
       <div className="mt-8">
-        <h2 className="text-xs text-zinc-500 mb-2">Bankroll Snapshot Debug</h2>
-        {errBankroll && <ErrorBox title="bot_bankroll error" text={errBankroll} />}
+        <h2 className="text-xs text-zinc-500 mb-2">Debug</h2>
         {errRun && <ErrorBox title="bot_runs error" text={errRun} />}
+        {errBankroll && <ErrorBox title="bot_bankroll error" text={errBankroll} />}
         <div className="text-xs font-mono text-zinc-400">
           Latest bankroll row ts: {bankroll?.ts ?? "--"}
         </div>
@@ -509,7 +604,7 @@ export const Dashboard: React.FC = () => {
 };
 
 /* =========================
-   SMALL COMPONENTS
+  SMALL COMPONENTS
 ========================= */
 const Metric = ({ label, value }: any) => (
   <div className="bg-zinc-900 border border-zinc-800 rounded p-3">
