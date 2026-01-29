@@ -412,14 +412,17 @@ const payload = {
   /* =========================
     METRICS
   ========================= */
-  const realizedPnl = useMemo(
-    () => settlements.reduce((a, s) => a + Number(s.pnl || 0), 0),
-    [settlements]
-  );
+const realizedPnl = useMemo(() => {
+  if (!bankroll || Number(bankroll.exposure) === 0) return 0;
+  return settlements.reduce((a, s) => a + Number(s.pnl || 0), 0);
+}, [settlements, bankroll]);
 
-  const estimatedReturn = useMemo(() => {
-    return ticks.reduce((a, t) => a + Number(t.expected_pnl || 0), 0);
-  }, [ticks]);
+
+const estimatedReturn = useMemo(() => {
+  if (!bankroll || Number(bankroll.exposure) === 0) return 0;
+  return ticks.reduce((a, t) => a + Number(t.expected_pnl || 0), 0);
+}, [ticks, bankroll]);
+
 
   // Compute latest valuation per slug (client-side)
   const totalUnrealizedPnl = useMemo(() => {
