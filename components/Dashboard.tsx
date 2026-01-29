@@ -386,13 +386,15 @@ export const Dashboard: React.FC = () => {
     }
 
     try {
-      const payload = {
-        run_id: runId,
-        ts: new Date().toISOString(),
-        bankroll: Number(bankroll.bankroll),
-        exposure: Number(bankroll.exposure),
-        cap_per_market: Number(capInput),
-      };
+const payload = {
+  run_id: runId,
+  ts: new Date().toISOString(),
+  bankroll: Number(bankroll.bankroll),
+  exposure: Number(bankroll.exposure),
+  cap_per_market: Number(capInput),
+  source: "dashboard", // <-- REQUIRED BY RLS
+};
+
 
       const { error } = await supabase.from("bot_bankroll").insert(payload as any);
 
