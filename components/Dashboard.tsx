@@ -33,6 +33,12 @@ const supabase = createClient(resolvedUrl, resolvedKey);
 /* =========================
   TYPES
 ========================= */
+interface RunRow {
+  run_id: string;
+  status: string;
+  created_at: string;
+}
+
 interface BankrollRow {
   bankroll: number;
   cap_per_market: number;
@@ -40,6 +46,7 @@ interface BankrollRow {
   ts: string;
   run_id?: string;
 }
+
 interface SettlementRow {
   slug: string;
   final_outcome: string;
@@ -49,16 +56,18 @@ interface SettlementRow {
   evidence?: any;
   run_id?: string;
 }
+
 interface Tick {
   slug: string;
   yes_price: number;
   no_price: number;
   edge_after_fees: number;
   recommended_size: number;
-  expected_pnl?: number; // NEW
+  expected_pnl?: number; // optional
   created_at: string;
   run_id?: string;
 }
+
 interface ValuationRow {
   slug: string;
   ts: string;
@@ -80,11 +89,13 @@ export const Dashboard: React.FC = () => {
   const [ticks, setTicks] = useState<Tick[]>([]);
   const [valuations, setValuations] = useState<ValuationRow[]>([]);
 
-  // NEW: active run_id
+  // Runs + selection
+  const [runs, setRuns] = useState<RunRow[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
 
-  // NEW: session start marker (derived from bankroll snapshots)
-  const [sessionStartTs, setSessionStartTs] = useState<string | null>(null);
+  // Cap control (dashboard)
+  const [capInput, setCapInput] = useState<number>(500);
+  const [capMsg, setCapMsg] = useState<string | null>(null);
 
   // Connection / debugging truth (so you’re not guessing)
   const [errRun, setErrRun] = useState<string | null>(null);
@@ -110,63 +121,97 @@ export const Dashboard: React.FC = () => {
     return keyLooksReal && !any401;
   }, [errRun, errBankroll, errSettlements, errTicks, errValuations]);
 
-  // NEW: load active RUNNING run_id (latest)
+  /* =========================
+    RUN DISCOVERY + SELECTOR
+    KEY FIX FOR YOUR "STUCK METRICS":
+    - If bot_runs doesn't rotate run_id on restart, the dashboard will keep showing the old run.
+    - So we: (1) load latest runs, (2) auto-select RUNNING else latest, (3) allow manual selection.
+  ========================= */
   useEffect(() => {
     let stop = false;
 
-    async function loadRun() {
+    async function loadRuns() {
       try {
         const { data, error } = await supabase
           .from("bot_runs")
           .select("run_id,status,created_at")
-          .eq("status", "RUNNING")
           .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
+          .limit(15);
 
         if (stop) return;
 
         if (error) {
           setErrRun(formatSbError("bot_runs", error));
-          setRunId(null);
+          setRuns([]);
+          // don't forcibly clear runId here; keep current selection if any
           return;
         }
 
         setErrRun(null);
-        setRunId((data as any)?.run_id ?? null);
+        const rows = (data || []) as any as RunRow[];
+        setRuns(rows);
+
+        // Auto-select logic:
+        // - If runId already selected, keep it.
+        // - Else prefer latest RUNNING.
+        // - Else pick latest row.
+        if (!runId) {
+          const running = rows.find((r) => String(r.status).toUpperCase() === "RUNNING");
+          const fallback = rows[0];
+          const next = (running?.run_id || fallback?.run_id || null) as any;
+          setRunId(next);
+        }
       } catch (e: any) {
         if (stop) return;
         setErrRun(`bot_runs unexpected: ${String(e?.message ?? e)}`);
-        setRunId(null);
+        setRuns([]);
       }
     }
 
-    loadRun();
-    const i = setInterval(loadRun, 5000);
+    loadRuns();
+    const i = setInterval(loadRuns, 5000);
     return () => {
       stop = true;
       clearInterval(i);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId]);
 
-  // Bankroll (run-scoped) + sessionStartTs discovery (derived from bankroll snapshots)
+  // IMPORTANT: when runId changes, hard-reset the UI state so metrics go back to 0 immediately.
+  useEffect(() => {
+    setBankroll(null);
+    setSettlements([]);
+    setTicks([]);
+    setValuations([]);
+    setErrBankroll(null);
+    setErrSettlements(null);
+    setErrTicks(null);
+    setErrValuations(null);
+    setCapMsg(null);
+  }, [runId]);
+
+  // Sync cap input from latest bankroll row (if available)
+  useEffect(() => {
+    if (bankroll?.cap_per_market != null && Number.isFinite(Number(bankroll.cap_per_market))) {
+      setCapInput(Number(bankroll.cap_per_market));
+    }
+  }, [bankroll]);
+
+  /* =========================
+    DATA LOADERS (run-scoped)
+  ========================= */
+
+  // Bankroll (run-scoped)
   useEffect(() => {
     let stop = false;
-
-    function approxEq(a: number, b: number, eps = 1e-6) {
-      return Math.abs(a - b) <= eps;
-    }
-
-    async function loadBankrollAndSessionStart() {
+    async function loadBankroll() {
       try {
         if (!runId) {
           setBankroll(null);
-          setSessionStartTs(null);
           return;
         }
 
-        // Latest bankroll row (for Strategy Equity + Exposure)
-        const { data: latest, error: eLatest } = await supabase
+        const { data, error } = await supabase
           .from("bot_bankroll")
           .select("*")
           .eq("run_id", runId)
@@ -176,53 +221,21 @@ export const Dashboard: React.FC = () => {
 
         if (stop) return;
 
-        if (eLatest) {
-          setErrBankroll(formatSbError("bot_bankroll", eLatest));
+        if (error) {
+          setErrBankroll(formatSbError("bot_bankroll", error));
           return;
         }
 
         setErrBankroll(null);
-        if (latest) setBankroll(latest as any);
-
-        // Find session start marker:
-        // Most recent bankroll snapshot with exposure==0 and bankroll ~ 1000.
-        // This is a pragmatic “restart reset” detector without needing new backend fields.
-        const { data: hist, error: eHist } = await supabase
-          .from("bot_bankroll")
-          .select("ts,bankroll,exposure,run_id")
-          .eq("run_id", runId)
-          .order("ts", { ascending: false })
-          .limit(500);
-
-        if (stop) return;
-
-        if (eHist) {
-          // Non-fatal; we can still render dashboard without session reset behavior.
-          console.warn("[DASH] bot_bankroll history load failed", eHist);
-          setSessionStartTs(null);
-          return;
-        }
-
-        let found: string | null = null;
-        for (const r of hist || []) {
-          const b = Number((r as any).bankroll);
-          const ex = Number((r as any).exposure);
-          if (Number.isFinite(b) && Number.isFinite(ex)) {
-            if (approxEq(ex, 0) && approxEq(b, 1000)) {
-              found = String((r as any).ts);
-              break; // first match is most recent due to DESC order
-            }
-          }
-        }
-        setSessionStartTs(found);
+        setBankroll((data as any) ?? null);
       } catch (e: any) {
         if (stop) return;
         setErrBankroll(`bot_bankroll unexpected: ${String(e?.message ?? e)}`);
       }
     }
 
-    loadBankrollAndSessionStart();
-    const i = setInterval(loadBankrollAndSessionStart, 3000);
+    loadBankroll();
+    const i = setInterval(loadBankroll, 3000);
     return () => {
       stop = true;
       clearInterval(i);
@@ -244,7 +257,7 @@ export const Dashboard: React.FC = () => {
           .select("*")
           .eq("run_id", runId)
           .order("settled_at", { ascending: false })
-          .limit(200);
+          .limit(50);
 
         if (stop) return;
 
@@ -257,9 +270,7 @@ export const Dashboard: React.FC = () => {
         setSettlements((data || []) as any);
       } catch (e: any) {
         if (stop) return;
-        setErrSettlements(
-          `bot_settlements unexpected: ${String(e?.message ?? e)}`
-        );
+        setErrSettlements(`bot_settlements unexpected: ${String(e?.message ?? e)}`);
       }
     }
 
@@ -286,7 +297,7 @@ export const Dashboard: React.FC = () => {
           .select("*")
           .eq("run_id", runId)
           .order("created_at", { ascending: false })
-          .limit(200);
+          .limit(50);
 
         if (stop) return;
 
@@ -311,7 +322,7 @@ export const Dashboard: React.FC = () => {
     };
   }, [runId]);
 
-  // valuations (run-scoped)
+  // Valuations (run-scoped)
   useEffect(() => {
     let stop = false;
     async function loadValuations() {
@@ -341,9 +352,7 @@ export const Dashboard: React.FC = () => {
         setValuations((data || []) as any);
       } catch (e: any) {
         if (stop) return;
-        setErrValuations(
-          `bot_unrealized_valuations unexpected: ${String(e?.message ?? e)}`
-        );
+        setErrValuations(`bot_unrealized_valuations unexpected: ${String(e?.message ?? e)}`);
       }
     }
 
@@ -355,22 +364,60 @@ export const Dashboard: React.FC = () => {
     };
   }, [runId]);
 
-  const openPositionCost = bankroll?.exposure ?? 0;
+  /* =========================
+    CAP CONTROL ACTION
+    NOTE:
+    This writes a NEW bot_bankroll row with the chosen cap_per_market.
+    Your engine must read cap_per_market from the latest bankroll row on startup (or from its own config).
+    Even if your engine doesn't read it yet, this is still useful for test bookkeeping.
+  ========================= */
+  async function writeCapPerMarket() {
+    if (!runId) {
+      setCapMsg("No run selected.");
+      return;
+    }
+    if (!bankroll) {
+      setCapMsg("No bankroll row loaded yet (wait 1–2 seconds).");
+      return;
+    }
+    if (!Number.isFinite(Number(capInput)) || Number(capInput) <= 0) {
+      setCapMsg("Invalid cap value.");
+      return;
+    }
 
-  // Estimated Return should be 0 when no open positions (your requirement)
+    try {
+      const payload = {
+        run_id: runId,
+        ts: new Date().toISOString(),
+        bankroll: Number(bankroll.bankroll),
+        exposure: Number(bankroll.exposure),
+        cap_per_market: Number(capInput),
+      };
+
+      const { error } = await supabase.from("bot_bankroll").insert(payload as any);
+
+      if (error) {
+        setCapMsg(`Write failed: ${error.message}`);
+        return;
+      }
+
+      setCapMsg(`OK: cap_per_market set to ${Number(capInput).toFixed(2)} (new bankroll row inserted)`);
+    } catch (e: any) {
+      setCapMsg(`Write failed: ${String(e?.message ?? e)}`);
+    }
+  }
+
+  /* =========================
+    METRICS
+  ========================= */
+  const realizedPnl = useMemo(
+    () => settlements.reduce((a, s) => a + Number(s.pnl || 0), 0),
+    [settlements]
+  );
+
   const estimatedReturn = useMemo(() => {
-    if (openPositionCost === 0) return 0;
     return ticks.reduce((a, t) => a + Number(t.expected_pnl || 0), 0);
-  }, [ticks, openPositionCost]);
-
-  // Realized PnL resets on restart using sessionStartTs marker (your requirement)
-  const realizedPnl = useMemo(() => {
-    const start = sessionStartTs;
-    if (!start) return 0;
-    return settlements
-      .filter((s) => String(s.settled_at) >= start)
-      .reduce((a, s) => a + Number(s.pnl || 0), 0);
-  }, [settlements, sessionStartTs]);
+  }, [ticks]);
 
   // Compute latest valuation per slug (client-side)
   const totalUnrealizedPnl = useMemo(() => {
@@ -383,10 +430,13 @@ export const Dashboard: React.FC = () => {
     return sum;
   }, [valuations]);
 
+  const openPositionCost = bankroll?.exposure ?? 0;
+
   const banner = useMemo(() => {
     const keyLooksPlaceholder =
       resolvedKey.includes("PASTE_YOUR_REAL_ANON_KEY_HERE") ||
       resolvedKey.includes("YOUR_ANON_KEY_HERE");
+
     if (keyLooksPlaceholder) {
       return {
         kind: "bad" as const,
@@ -429,7 +479,7 @@ export const Dashboard: React.FC = () => {
       return {
         kind: "warn" as const,
         text:
-          "No active RUNNING run_id found in bot_runs. Create/start a run to see live telemetry.",
+          "No run selected (bot_runs empty or not readable).",
       };
     }
 
@@ -480,28 +530,101 @@ export const Dashboard: React.FC = () => {
           )}
           <div>{banner.text}</div>
         </div>
+
         <div className="mt-2 text-xs opacity-80 font-mono">
           url={resolvedUrl} | keyLen={resolvedKey?.length ?? 0}
           {runId ? ` | run_id=${runId}` : ""}
-          {sessionStartTs ? ` | session_start=${sessionStartTs}` : ""}
+        </div>
+
+        {/* RUN SELECTOR (THIS IS THE FIX FOR "STUCK PNL") */}
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+          <div className="font-mono text-zinc-400">Run:</div>
+          <select
+            className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs"
+            value={runId ?? ""}
+            onChange={(e) => setRunId(e.target.value || null)}
+          >
+            {runs.map((r) => (
+              <option key={r.run_id} value={r.run_id}>
+                {r.status} | {r.run_id.slice(0, 8)}… | {new Date(r.created_at).toLocaleString()}
+              </option>
+            ))}
+            {runs.length === 0 && <option value="">(no runs)</option>}
+          </select>
         </div>
       </div>
 
       {/* ================= METRICS ================= */}
-      <div className="grid grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-4 gap-4 mb-6">
         <Metric
           label="Strategy Equity"
-          value={bankroll ? bankroll.bankroll.toFixed(2) : "--"}
+          value={bankroll ? Number(bankroll.bankroll).toFixed(2) : "--"}
         />
-        <Metric label="Open Position Cost" value={openPositionCost.toFixed(2)} />
-        <Metric label="Estimated Return" value={estimatedReturn.toFixed(2)} />
-        <Metric label="Realized PnL" value={realizedPnl.toFixed(2)} />
+        <Metric label="Open Position Cost" value={Number(openPositionCost).toFixed(2)} />
+        <Metric label="Estimated Return" value={Number(estimatedReturn).toFixed(2)} />
+        <Metric label="Realized PnL" value={Number(realizedPnl).toFixed(2)} />
       </div>
 
       <div className="text-[11px] text-zinc-500 mb-6">
-        Unrealized PnL estimator: conservative bid-side liquidation value minus
-        fee-equivalent taker fee estimate (15m crypto). Total unrealized (latest
-        by slug): {totalUnrealizedPnl.toFixed(4)}
+        Unrealized PnL estimator: conservative bid-side liquidation value minus fee-equivalent taker fee estimate (15m crypto).
+        <span className="ml-2 text-zinc-600">(uPnL rows loaded: {valuations.length})</span>
+        <span className="ml-2 text-zinc-600">(total uPnL latest-by-slug: {totalUnrealizedPnl.toFixed(4)})</span>
+      </div>
+
+      {/* ================= CAP CONTROL ================= */}
+      <div className="bg-black border border-zinc-800 rounded p-4 mb-8">
+        <h2 className="text-sm text-zinc-400 mb-3">Risk Control (cap_per_market)</h2>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="text-xs text-zinc-500 font-mono">
+            current cap:{" "}
+            <span className="text-zinc-200">
+              {bankroll ? Number(bankroll.cap_per_market).toFixed(2) : "--"}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              className="bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 px-2 py-1 rounded text-xs"
+              onClick={() => setCapInput(250)}
+            >
+              250
+            </button>
+            <button
+              className="bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 px-2 py-1 rounded text-xs"
+              onClick={() => setCapInput(500)}
+            >
+              500
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm w-32"
+              value={capInput}
+              onChange={(e) => setCapInput(Number(e.target.value))}
+              step={50}
+              min={0}
+            />
+            <button
+              onClick={writeCapPerMarket}
+              className="bg-emerald-900 hover:bg-emerald-800 text-emerald-200 px-3 py-1 rounded text-xs"
+            >
+              Set cap_per_market
+            </button>
+          </div>
+        </div>
+
+        <div className="text-[11px] text-zinc-500 mt-2">
+          This inserts a new <span className="font-mono">bot_bankroll</span> row with the chosen cap. Stop the bot before changing.
+        </div>
+
+        {capMsg && (
+          <div className="mt-2 text-[11px] font-mono text-zinc-300">
+            {capMsg}
+          </div>
+        )}
       </div>
 
       {/* ================= SETTLED MARKETS ================= */}
@@ -510,9 +633,7 @@ export const Dashboard: React.FC = () => {
           <CheckCircle className="text-emerald-400" />
           Resolved Markets
         </h2>
-        {errSettlements && (
-          <ErrorBox title="bot_settlements error" text={errSettlements} />
-        )}
+        {errSettlements && <ErrorBox title="bot_settlements error" text={errSettlements} />}
         <div className="max-h-64 overflow-y-auto">
           <table className="w-full text-xs font-mono">
             <thead className="bg-zinc-900 sticky top-0">
@@ -570,16 +691,10 @@ export const Dashboard: React.FC = () => {
           <tbody>
             {ticks.map((t, i) => (
               <tr key={i} className="border-t border-zinc-800">
-                <td className="p-2">
-                  {new Date(t.created_at).toLocaleTimeString()}
-                </td>
+                <td className="p-2">{new Date(t.created_at).toLocaleTimeString()}</td>
                 <td className="p-2 truncate max-w-[320px]">{t.slug}</td>
-                <td className="p-2 text-center">
-                  {Number(t.edge_after_fees).toFixed(4)}
-                </td>
-                <td className="p-2 text-center">
-                  {Number(t.recommended_size).toFixed(2)}
-                </td>
+                <td className="p-2 text-center">{Number(t.edge_after_fees).toFixed(4)}</td>
+                <td className="p-2 text-center">{Number(t.recommended_size).toFixed(2)}</td>
               </tr>
             ))}
             {ticks.length === 0 && (
@@ -595,15 +710,8 @@ export const Dashboard: React.FC = () => {
 
       {/* ================= UNREALIZED VALUATIONS ================= */}
       <div className="bg-black border border-zinc-800 rounded p-4 mt-8">
-        <h2 className="text-xs text-zinc-500 mb-2">
-          Unrealized Valuations (latest by slug)
-        </h2>
-        {errValuations && (
-          <ErrorBox
-            title="bot_unrealized_valuations error"
-            text={errValuations}
-          />
-        )}
+        <h2 className="text-xs text-zinc-500 mb-2">Unrealized Valuations (latest by slug)</h2>
+        {errValuations && <ErrorBox title="bot_unrealized_valuations error" text={errValuations} />}
         <div className="max-h-64 overflow-y-auto">
           <table className="w-full text-xs font-mono">
             <thead className="bg-zinc-900 sticky top-0">
@@ -621,9 +729,7 @@ export const Dashboard: React.FC = () => {
                   <td className="p-2 truncate max-w-[320px]">{v.slug}</td>
                   <td
                     className={`p-2 text-center ${
-                      Number(v.unrealized_pnl) >= 0
-                        ? "text-emerald-400"
-                        : "text-red-400"
+                      Number(v.unrealized_pnl) >= 0 ? "text-emerald-400" : "text-red-400"
                     }`}
                   >
                     {Number(v.unrealized_pnl).toFixed(4)}
@@ -649,10 +755,10 @@ export const Dashboard: React.FC = () => {
         {errRun && <ErrorBox title="bot_runs error" text={errRun} />}
         {errBankroll && <ErrorBox title="bot_bankroll error" text={errBankroll} />}
         <div className="text-xs font-mono text-zinc-400">
-          Latest bankroll row ts: {bankroll?.ts ?? "--"}
+          Selected run_id: {runId ?? "--"}
         </div>
         <div className="text-xs font-mono text-zinc-400">
-          Session start ts (derived): {sessionStartTs ?? "--"}
+          Latest bankroll row ts: {bankroll?.ts ?? "--"}
         </div>
       </div>
     </div>
@@ -680,7 +786,5 @@ function formatSbError(table: string, error: any): string {
   const msg = error?.message ? String(error.message) : String(error);
   const code = error?.code ? String(error.code) : "";
   const status = error?.status ? String(error.status) : "";
-  return `${table}: ${msg}${code ? ` | code=${code}` : ""}${
-    status ? ` | status=${status}` : ""
-  }`;
+  return `${table}: ${msg}${code ? ` | code=${code}` : ""}${status ? ` | status=${status}` : ""}`;
 }
