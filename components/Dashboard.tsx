@@ -92,6 +92,12 @@ export const Dashboard: React.FC = () => {
   const [ticks, setTicks] = useState<Tick[]>([]);
   const [valuations, setValuations] = useState<ValuationRow[]>([]);
 
+  // Lifetime (cross-run) snapshots / aggregates
+  const [lifetimeStartBankroll, setLifetimeStartBankroll] = useState<number | null>(null);
+  const [lifetimeLatestAnyBankroll, setLifetimeLatestAnyBankroll] = useState<BankrollRow | null>(null);
+  const [lifetimeRealizedPnl, setLifetimeRealizedPnl] = useState<number>(0);
+  const [errLifetime, setErrLifetime] = useState<string | null>(null);
+
   // Runs + selection
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
@@ -119,10 +125,11 @@ export const Dashboard: React.FC = () => {
       (errTicks || "").includes("401") ||
       (errBankroll || "").includes("401") ||
       (errSettlements || "").includes("401") ||
-      (errValuations || "").includes("401");
+      (errValuations || "").includes("401") ||
+      (errLifetime || "").includes("401");
 
     return keyLooksReal && !any401;
-  }, [errRun, errBankroll, errSettlements, errTicks, errValuations]);
+  }, [errRun, errBankroll, errSettlements, errTicks, errValuations, errLifetime]);
 
   /* =========================
     RUN DISCOVERY + SELECTOR
@@ -369,6 +376,99 @@ export const Dashboard: React.FC = () => {
   }, [runId]);
 
   /* =========================
+    LIFETIME LOADERS (cross-run)
+    - realized pnl: sum of all settlements.pnl (paged)
+    - start bankroll baseline: earliest engine bankroll row (fallback 1000)
+    - latest exposure: latest bankroll row overall
+  ========================= */
+  useEffect(() => {
+    let stop = false;
+
+    async function loadLifetime() {
+      try {
+        // 1) Baseline starting bankroll (earliest engine row)
+        // If no engine rows exist, fallback to 1000.
+        const { data: startData, error: startErr } = await supabase
+          .from("bot_bankroll")
+          .select("bankroll,ts,source")
+          .eq("source", "engine")
+          .order("ts", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+
+        if (stop) return;
+
+        if (startErr) {
+          setErrLifetime(formatSbError("lifetime(bot_bankroll start)", startErr));
+        } else {
+          const b0 = Number((startData as any)?.bankroll);
+          setLifetimeStartBankroll(Number.isFinite(b0) ? b0 : 1000);
+          setErrLifetime(null);
+        }
+
+        // 2) Latest bankroll row across any run (for lifetime "current exposure")
+        const { data: latestData, error: latestErr } = await supabase
+          .from("bot_bankroll")
+          .select("*")
+          .order("ts", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (stop) return;
+
+        if (latestErr) {
+          setErrLifetime(formatSbError("lifetime(bot_bankroll latest)", latestErr));
+        } else {
+          setLifetimeLatestAnyBankroll((latestData as any) ?? null);
+          setErrLifetime(null);
+        }
+
+        // 3) Lifetime realized pnl: sum of all settlements pnl (paged to avoid silent truncation)
+        // We fetch only the pnl column for efficiency.
+        const pageSize = 1000;
+        const maxPages = 50; // hard safety cap: up to 50k rows
+        let from = 0;
+        let total = 0;
+        for (let page = 0; page < maxPages; page++) {
+          const { data: pnlRows, error: pnlErr } = await supabase
+            .from("bot_settlements")
+            .select("pnl")
+            .range(from, from + pageSize - 1);
+
+          if (stop) return;
+
+          if (pnlErr) {
+            setErrLifetime(formatSbError("lifetime(bot_settlements pnl)", pnlErr));
+            break;
+          }
+
+          const arr = (pnlRows || []) as any[];
+          for (const r of arr) total += Number(r?.pnl || 0);
+
+          if (arr.length < pageSize) {
+            // done
+            setLifetimeRealizedPnl(total);
+            setErrLifetime(null);
+            break;
+          }
+
+          from += pageSize;
+        }
+      } catch (e: any) {
+        if (stop) return;
+        setErrLifetime(`lifetime unexpected: ${String(e?.message ?? e)}`);
+      }
+    }
+
+    loadLifetime();
+    const i = setInterval(loadLifetime, 8000);
+    return () => {
+      stop = true;
+      clearInterval(i);
+    };
+  }, []);
+
+  /* =========================
     CAP CONTROL ACTION
   ========================= */
   async function writeCapPerMarket() {
@@ -417,12 +517,23 @@ export const Dashboard: React.FC = () => {
     IMPORTANT: Do NOT blank these just because exposure is 0.
     Exposure=0 is a valid state between markets.
   ========================= */
+
+  // RUN-scoped realized pnl
   const realizedPnl = useMemo(() => {
     return settlements.reduce((a, s) => a + Number(s.pnl || 0), 0);
   }, [settlements]);
 
+  // RUN-scoped estimated return:
+  // Use the latest tick per slug, then sum expected_pnl.
+  // This avoids "meaningless" inflation from counting many ticks for the same market.
   const estimatedReturn = useMemo(() => {
-    return ticks.reduce((a, t) => a + Number(t.expected_pnl || 0), 0);
+    const latestBySlug = new Map<string, Tick>();
+    for (const t of ticks) {
+      if (!latestBySlug.has(t.slug)) latestBySlug.set(t.slug, t);
+    }
+    let sum = 0;
+    for (const t of latestBySlug.values()) sum += Number(t.expected_pnl || 0);
+    return sum;
   }, [ticks]);
 
   // Compute latest valuation per slug (client-side)
@@ -437,6 +548,19 @@ export const Dashboard: React.FC = () => {
   }, [valuations]);
 
   const openPositionCost = bankroll?.exposure ?? 0;
+
+  // LIFETIME metrics (explicit)
+  const lifetimeOpenPositionCost = lifetimeLatestAnyBankroll?.exposure ?? 0;
+
+  // Lifetime strategy equity baseline:
+  // - Prefer earliest engine bankroll row (lifetimeStartBankroll)
+  // - Fallback to 1000 if unavailable
+  const lifetimeEquity = useMemo(() => {
+    const base = Number.isFinite(Number(lifetimeStartBankroll))
+      ? Number(lifetimeStartBankroll)
+      : 1000;
+    return base + Number(lifetimeRealizedPnl || 0);
+  }, [lifetimeStartBankroll, lifetimeRealizedPnl]);
 
   const banner = useMemo(() => {
     const keyLooksPlaceholder =
@@ -456,7 +580,8 @@ export const Dashboard: React.FC = () => {
       (errTicks || "").includes("401") ||
       (errBankroll || "").includes("401") ||
       (errSettlements || "").includes("401") ||
-      (errValuations || "").includes("401");
+      (errValuations || "").includes("401") ||
+      (errLifetime || "").includes("401");
 
     if (any401) {
       return {
@@ -470,7 +595,8 @@ export const Dashboard: React.FC = () => {
       (errTicks || "").includes("403") ||
       (errBankroll || "").includes("403") ||
       (errSettlements || "").includes("403") ||
-      (errValuations || "").includes("403");
+      (errValuations || "").includes("403") ||
+      (errLifetime || "").includes("403");
 
     if (any403) {
       return {
@@ -484,7 +610,7 @@ export const Dashboard: React.FC = () => {
       return { kind: "warn" as const, text: "No run selected (bot_runs empty or not readable)." };
     }
 
-    if (errRun || errTicks || errBankroll || errSettlements || errValuations) {
+    if (errRun || errTicks || errBankroll || errSettlements || errValuations || errLifetime) {
       return {
         kind: "warn" as const,
         text: "Dashboard is running but at least one query is failing. Scroll down to see exact errors.",
@@ -492,7 +618,7 @@ export const Dashboard: React.FC = () => {
     }
 
     return { kind: "ok" as const, text: "Supabase reads OK." };
-  }, [errRun, errBankroll, errSettlements, errTicks, errValuations, runId]);
+  }, [errRun, errBankroll, errSettlements, errTicks, errValuations, errLifetime, runId]);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-200 p-6">
@@ -549,11 +675,52 @@ export const Dashboard: React.FC = () => {
       </div>
 
       {/* ================= METRICS ================= */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
-        <Metric label="Strategy Equity" value={bankroll ? Number(bankroll.bankroll).toFixed(2) : "--"} />
-        <Metric label="Open Position Cost" value={bankroll ? Number(openPositionCost).toFixed(2) : "--"} />
-        <Metric label="Estimated Return" value={Number(estimatedReturn).toFixed(2)} />
-        <Metric label="Realized PnL" value={Number(realizedPnl).toFixed(2)} />
+      {/* Primary (RUN-scoped) row - emphasized */}
+      <div className="grid grid-cols-4 gap-4 mb-3">
+        <Metric
+          label="Strategy Equity (Run)"
+          value={bankroll ? Number(bankroll.bankroll).toFixed(2) : "--"}
+          size="lg"
+        />
+        <Metric
+          label="Open Position Cost (Run)"
+          value={bankroll ? Number(openPositionCost).toFixed(2) : "--"}
+          size="lg"
+        />
+        <Metric
+          label="Estimated Return (Run)"
+          value={Number(estimatedReturn).toFixed(2)}
+          size="lg"
+        />
+        <Metric
+          label="Realized PnL (Run)"
+          value={Number(realizedPnl).toFixed(2)}
+          size="lg"
+        />
+      </div>
+
+      {/* Secondary (LIFETIME) row - smaller/labeled */}
+      <div className="grid grid-cols-4 gap-4 mb-6 opacity-80">
+        <Metric
+          label="Strategy Equity (Lifetime)"
+          value={Number(lifetimeEquity).toFixed(2)}
+          size="sm"
+        />
+        <Metric
+          label="Open Position Cost (Lifetime)"
+          value={Number(lifetimeOpenPositionCost).toFixed(2)}
+          size="sm"
+        />
+        <Metric
+          label="Estimated Return (Lifetime)"
+          value={"N/A"}
+          size="sm"
+        />
+        <Metric
+          label="Realized PnL (Lifetime)"
+          value={Number(lifetimeRealizedPnl).toFixed(2)}
+          size="sm"
+        />
       </div>
 
       <div className="text-[11px] text-zinc-500 mb-6">
@@ -733,8 +900,16 @@ export const Dashboard: React.FC = () => {
         <h2 className="text-xs text-zinc-500 mb-2">Debug</h2>
         {errRun && <ErrorBox title="bot_runs error" text={errRun} />}
         {errBankroll && <ErrorBox title="bot_bankroll error" text={errBankroll} />}
+        {errLifetime && <ErrorBox title="lifetime error" text={errLifetime} />}
         <div className="text-xs font-mono text-zinc-400">Selected run_id: {runId ?? "--"}</div>
         <div className="text-xs font-mono text-zinc-400">Latest bankroll row ts: {bankroll?.ts ?? "--"}</div>
+        <div className="text-xs font-mono text-zinc-400">
+          Lifetime baseline bankroll:{" "}
+          {Number.isFinite(Number(lifetimeStartBankroll)) ? Number(lifetimeStartBankroll).toFixed(2) : "--"}
+        </div>
+        <div className="text-xs font-mono text-zinc-400">
+          Lifetime realized pnl (sum all settlements): {Number(lifetimeRealizedPnl).toFixed(2)}
+        </div>
       </div>
     </div>
   );
@@ -743,12 +918,17 @@ export const Dashboard: React.FC = () => {
 /* =========================
   SMALL COMPONENTS
 ========================= */
-const Metric = ({ label, value }: any) => (
-  <div className="bg-zinc-900 border border-zinc-800 rounded p-3">
-    <div className="text-[10px] uppercase text-zinc-500">{label}</div>
-    <div className="text-lg font-mono text-white">{value ?? "--"}</div>
-  </div>
-);
+const Metric = ({ label, value, size }: any) => {
+  const isSmall = String(size || "").toLowerCase() === "sm";
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded p-3">
+      <div className="text-[10px] uppercase text-zinc-500">{label}</div>
+      <div className={`${isSmall ? "text-base" : "text-lg"} font-mono text-white`}>
+        {value ?? "--"}
+      </div>
+    </div>
+  );
+};
 
 const ErrorBox = ({ title, text }: { title: string; text: string }) => (
   <div className="mb-3 rounded border border-red-900 bg-red-950/30 p-3 text-red-200">
