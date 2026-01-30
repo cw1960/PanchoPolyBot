@@ -97,9 +97,6 @@ export const Dashboard: React.FC = () => {
   const [capInput, setCapInput] = useState<number>(500);
   const [capMsg, setCapMsg] = useState<string | null>(null);
 
-  // NEW: prevents polling from overwriting user-entered capInput
-  const [capTouched, setCapTouched] = useState<boolean>(false);
-
   // Connection / debugging truth (so you’re not guessing)
   const [errRun, setErrRun] = useState<string | null>(null);
   const [errBankroll, setErrBankroll] = useState<string | null>(null);
@@ -159,9 +156,7 @@ export const Dashboard: React.FC = () => {
         // - Else prefer latest RUNNING.
         // - Else pick latest row.
         if (!runId) {
-          const running = rows.find(
-            (r) => String(r.status).toUpperCase() === "RUNNING"
-          );
+          const running = rows.find((r) => String(r.status).toUpperCase() === "RUNNING");
           const fallback = rows[0];
           const next = (running?.run_id || fallback?.run_id || null) as any;
           setRunId(next);
@@ -193,22 +188,14 @@ export const Dashboard: React.FC = () => {
     setErrTicks(null);
     setErrValuations(null);
     setCapMsg(null);
-
-    // NEW: allow bankroll polling to sync capInput again for the new run
-    setCapTouched(false);
   }, [runId]);
 
   // Sync cap input from latest bankroll row (if available)
-  // NEW: ONLY sync if user has NOT touched the cap input.
   useEffect(() => {
-    if (
-      !capTouched &&
-      bankroll?.cap_per_market != null &&
-      Number.isFinite(Number(bankroll.cap_per_market))
-    ) {
+    if (bankroll?.cap_per_market != null && Number.isFinite(Number(bankroll.cap_per_market))) {
       setCapInput(Number(bankroll.cap_per_market));
     }
-  }, [bankroll, capTouched]);
+  }, [bankroll]);
 
   /* =========================
     DATA LOADERS (run-scoped)
@@ -379,6 +366,10 @@ export const Dashboard: React.FC = () => {
 
   /* =========================
     CAP CONTROL ACTION
+    NOTE:
+    This writes a NEW bot_bankroll row with the chosen cap_per_market.
+    Your engine must read cap_per_market from the latest bankroll row on startup (or from its own config).
+    Even if your engine doesn't read it yet, this is still useful for test bookkeeping.
   ========================= */
   async function writeCapPerMarket() {
     if (!runId) {
@@ -412,7 +403,9 @@ export const Dashboard: React.FC = () => {
       }
 
       setCapMsg(
-        `OK: cap_per_market set to ${Number(capInput).toFixed(2)} (new bankroll row inserted)`
+        `OK: cap_per_market set to ${Number(capInput).toFixed(
+          2
+        )} (new bankroll row inserted)`
       );
     } catch (e: any) {
       setCapMsg(`Write failed: ${String(e?.message ?? e)}`);
@@ -422,15 +415,18 @@ export const Dashboard: React.FC = () => {
   /* =========================
     METRICS
   ========================= */
-  const realizedPnl = useMemo(() => {
-    if (!bankroll || Number(bankroll.exposure) === 0) return 0;
-    return settlements.reduce((a, s) => a + Number(s.pnl || 0), 0);
-  }, [settlements, bankroll]);
 
+  // FIX: realized pnl must NOT depend on exposure.
+  // Exposure goes to 0 after settlement (correctly) but realized pnl must still show total.
+  const realizedPnl = useMemo(
+    () => settlements.reduce((a, s) => a + Number(s.pnl || 0), 0),
+    [settlements]
+  );
+
+  // FIX: estimated return should reflect current ticks regardless of exposure.
   const estimatedReturn = useMemo(() => {
-    if (!bankroll || Number(bankroll.exposure) === 0) return 0;
     return ticks.reduce((a, t) => a + Number(t.expected_pnl || 0), 0);
-  }, [ticks, bankroll]);
+  }, [ticks]);
 
   // Compute latest valuation per slug (client-side)
   const totalUnrealizedPnl = useMemo(() => {
@@ -573,23 +569,15 @@ export const Dashboard: React.FC = () => {
           label="Strategy Equity"
           value={bankroll ? Number(bankroll.bankroll).toFixed(2) : "--"}
         />
-        <Metric
-          label="Open Position Cost"
-          value={Number(openPositionCost).toFixed(2)}
-        />
-        <Metric
-          label="Estimated Return"
-          value={Number(estimatedReturn).toFixed(2)}
-        />
+        <Metric label="Open Position Cost" value={Number(openPositionCost).toFixed(2)} />
+        <Metric label="Estimated Return" value={Number(estimatedReturn).toFixed(2)} />
         <Metric label="Realized PnL" value={Number(realizedPnl).toFixed(2)} />
       </div>
 
       <div className="text-[11px] text-zinc-500 mb-6">
-        Unrealized PnL estimator: conservative bid-side liquidation value minus
-        fee-equivalent taker fee estimate (15m crypto).
-        <span className="ml-2 text-zinc-600">
-          (uPnL rows loaded: {valuations.length})
-        </span>
+        Unrealized PnL estimator: conservative bid-side liquidation value minus fee-equivalent taker
+        fee estimate (15m crypto).
+        <span className="ml-2 text-zinc-600">(uPnL rows loaded: {valuations.length})</span>
         <span className="ml-2 text-zinc-600">
           (total uPnL latest-by-slug: {totalUnrealizedPnl.toFixed(4)})
         </span>
@@ -597,9 +585,7 @@ export const Dashboard: React.FC = () => {
 
       {/* ================= CAP CONTROL ================= */}
       <div className="bg-black border border-zinc-800 rounded p-4 mb-8">
-        <h2 className="text-sm text-zinc-400 mb-3">
-          Risk Control (cap_per_market)
-        </h2>
+        <h2 className="text-sm text-zinc-400 mb-3">Risk Control (cap_per_market)</h2>
 
         <div className="flex flex-wrap items-center gap-3">
           <div className="text-xs text-zinc-500 font-mono">
@@ -612,19 +598,13 @@ export const Dashboard: React.FC = () => {
           <div className="flex items-center gap-2">
             <button
               className="bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 px-2 py-1 rounded text-xs"
-              onClick={() => {
-                setCapTouched(true);
-                setCapInput(250);
-              }}
+              onClick={() => setCapInput(250)}
             >
               250
             </button>
             <button
               className="bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 px-2 py-1 rounded text-xs"
-              onClick={() => {
-                setCapTouched(true);
-                setCapInput(500);
-              }}
+              onClick={() => setCapInput(500)}
             >
               500
             </button>
@@ -635,10 +615,7 @@ export const Dashboard: React.FC = () => {
               type="number"
               className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm w-32"
               value={capInput}
-              onChange={(e) => {
-                setCapTouched(true);
-                setCapInput(Number(e.target.value));
-              }}
+              onChange={(e) => setCapInput(Number(e.target.value))}
               step={50}
               min={0}
             />
@@ -652,14 +629,12 @@ export const Dashboard: React.FC = () => {
         </div>
 
         <div className="text-[11px] text-zinc-500 mt-2">
-          This inserts a new <span className="font-mono">bot_bankroll</span> row
-          with the chosen cap. Stop the bot before changing.
+          This inserts a new <span className="font-mono">bot_bankroll</span> row with the chosen cap.
+          Stop the bot before changing.
         </div>
 
         {capMsg && (
-          <div className="mt-2 text-[11px] font-mono text-zinc-300">
-            {capMsg}
-          </div>
+          <div className="mt-2 text-[11px] font-mono text-zinc-300">{capMsg}</div>
         )}
       </div>
 
@@ -669,9 +644,7 @@ export const Dashboard: React.FC = () => {
           <CheckCircle className="text-emerald-400" />
           Resolved Markets
         </h2>
-        {errSettlements && (
-          <ErrorBox title="bot_settlements error" text={errSettlements} />
-        )}
+        {errSettlements && <ErrorBox title="bot_settlements error" text={errSettlements} />}
         <div className="max-h-64 overflow-y-auto">
           <table className="w-full text-xs font-mono">
             <thead className="bg-zinc-900 sticky top-0">
@@ -729,16 +702,10 @@ export const Dashboard: React.FC = () => {
           <tbody>
             {ticks.map((t, i) => (
               <tr key={i} className="border-t border-zinc-800">
-                <td className="p-2">
-                  {new Date(t.created_at).toLocaleTimeString()}
-                </td>
+                <td className="p-2">{new Date(t.created_at).toLocaleTimeString()}</td>
                 <td className="p-2 truncate max-w-[320px]">{t.slug}</td>
-                <td className="p-2 text-center">
-                  {Number(t.edge_after_fees).toFixed(4)}
-                </td>
-                <td className="p-2 text-center">
-                  {Number(t.recommended_size).toFixed(2)}
-                </td>
+                <td className="p-2 text-center">{Number(t.edge_after_fees).toFixed(4)}</td>
+                <td className="p-2 text-center">{Number(t.recommended_size).toFixed(2)}</td>
               </tr>
             ))}
             {ticks.length === 0 && (
@@ -754,14 +721,9 @@ export const Dashboard: React.FC = () => {
 
       {/* ================= UNREALIZED VALUATIONS ================= */}
       <div className="bg-black border border-zinc-800 rounded p-4 mt-8">
-        <h2 className="text-xs text-zinc-500 mb-2">
-          Unrealized Valuations (latest by slug)
-        </h2>
+        <h2 className="text-xs text-zinc-500 mb-2">Unrealized Valuations (latest by slug)</h2>
         {errValuations && (
-          <ErrorBox
-            title="bot_unrealized_valuations error"
-            text={errValuations}
-          />
+          <ErrorBox title="bot_unrealized_valuations error" text={errValuations} />
         )}
         <div className="max-h-64 overflow-y-auto">
           <table className="w-full text-xs font-mono">
@@ -776,15 +738,11 @@ export const Dashboard: React.FC = () => {
             <tbody>
               {valuations.slice(0, 20).map((v, i) => (
                 <tr key={i} className="border-t border-zinc-800">
-                  <td className="p-2">
-                    {new Date(v.ts).toLocaleTimeString()}
-                  </td>
+                  <td className="p-2">{new Date(v.ts).toLocaleTimeString()}</td>
                   <td className="p-2 truncate max-w-[320px]">{v.slug}</td>
                   <td
                     className={`p-2 text-center ${
-                      Number(v.unrealized_pnl) >= 0
-                        ? "text-emerald-400"
-                        : "text-red-400"
+                      Number(v.unrealized_pnl) >= 0 ? "text-emerald-400" : "text-red-400"
                     }`}
                   >
                     {Number(v.unrealized_pnl).toFixed(4)}
@@ -809,9 +767,7 @@ export const Dashboard: React.FC = () => {
         <h2 className="text-xs text-zinc-500 mb-2">Debug</h2>
         {errRun && <ErrorBox title="bot_runs error" text={errRun} />}
         {errBankroll && <ErrorBox title="bot_bankroll error" text={errBankroll} />}
-        <div className="text-xs font-mono text-zinc-400">
-          Selected run_id: {runId ?? "--"}
-        </div>
+        <div className="text-xs font-mono text-zinc-400">Selected run_id: {runId ?? "--"}</div>
         <div className="text-xs font-mono text-zinc-400">
           Latest bankroll row ts: {bankroll?.ts ?? "--"}
         </div>
@@ -833,9 +789,7 @@ const Metric = ({ label, value }: any) => (
 const ErrorBox = ({ title, text }: { title: string; text: string }) => (
   <div className="mb-3 rounded border border-red-900 bg-red-950/30 p-3 text-red-200">
     <div className="text-xs font-mono mb-1">{title}</div>
-    <div className="text-xs font-mono opacity-90 whitespace-pre-wrap">
-      {text}
-    </div>
+    <div className="text-xs font-mono opacity-90 whitespace-pre-wrap">{text}</div>
   </div>
 );
 
@@ -843,7 +797,5 @@ function formatSbError(table: string, error: any): string {
   const msg = error?.message ? String(error.message) : String(error);
   const code = error?.code ? String(error.code) : "";
   const status = error?.status ? String(error.status) : "";
-  return `${table}: ${msg}${code ? ` | code=${code}` : ""}${
-    status ? ` | status=${status}` : ""
-  }`;
+  return `${table}: ${msg}${code ? ` | code=${code}` : ""}${status ? ` | status=${status}` : ""}`;
 }
