@@ -1,40 +1,17 @@
-// Dashboard.tsx
-
+// Dashboard.tsx - Updated with New Metrics
 import React, { useEffect, useMemo, useState } from "react";
-import { Shield, CheckCircle, AlertTriangle } from "lucide-react";
+import { Shield, CheckCircle, AlertTriangle, TrendingUp, TrendingDown, Clock, DollarSign } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 
-/* =========================
-  SUPABASE CLIENT
-  IMPORTANT:
-  - 401 means missing/invalid key.
-  - 403 means RLS/policy denies read.
-========================= */
+/* ========================= SUPABASE CLIENT ========================= */
 const SUPABASE_URL = "https://bnobbksmuhhnikjprems.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJub2Jia3NtdWhobmlranByZW1zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc4MTIzNjUsImV4cCI6MjA4MzM4ODM2NX0.hVIHTZ-dEaa1KDlm1X5SqolsxW87ehYQcPibLWmnCWg";
 
-// ✅ PUT YOUR REAL ANON KEY HERE (the long JWT string from Supabase settings)
-const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJub2Jia3Ntd" +
-  "WhobmlranByZW1zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc4MTIzNjUsImV4cCI6MjA4MzM4O" +
-  "DM2NX0.hVIHTZ-dEaa1KDlm1X5SqolsxW87ehYQcPibLWmnCWg";
-
-// Allow optional overrides if you *later* decide to set them on window.
-// (Safe even if undefined.)
-const resolvedUrl =
-  (globalThis as any)?.SUPABASE_URL ||
-  (globalThis as any)?.window?.SUPABASE_URL ||
-  SUPABASE_URL;
-
-const resolvedKey =
-  (globalThis as any)?.SUPABASE_ANON_KEY ||
-  (globalThis as any)?.window?.SUPABASE_ANON_KEY ||
-  SUPABASE_ANON_KEY;
-
+const resolvedUrl = (globalThis as any)?.SUPABASE_URL || (globalThis as any)?.window?.SUPABASE_URL || SUPABASE_URL;
+const resolvedKey = (globalThis as any)?.SUPABASE_ANON_KEY || (globalThis as any)?.window?.SUPABASE_ANON_KEY || SUPABASE_ANON_KEY;
 const supabase = createClient(resolvedUrl, resolvedKey);
 
-/* =========================
-  TYPES
-========================= */
+/* ========================= TYPES ========================= */
 interface RunRow {
   run_id: string;
   status: string;
@@ -66,7 +43,11 @@ interface Tick {
   no_price: number;
   edge_after_fees: number;
   recommended_size: number;
-  expected_pnl?: number; // optional
+  expected_pnl?: number;
+  spread?: number;
+  spread_percent?: number;
+  expected_value?: number;
+  is_profitable?: boolean;
   created_at: string;
   run_id?: string;
 }
@@ -83,60 +64,94 @@ interface ValuationRow {
   run_id?: string;
 }
 
-/* =========================
-  DASHBOARD
-========================= */
+// NEW: Oracle Lag Types
+interface OracleLagRow {
+  id: number;
+  run_id: string;
+  lag_ms: number;
+  source: string;
+  market_slug?: string;
+  exchange_price?: number;
+  polymarket_price?: number;
+  change_percent?: number;
+  ts: string;
+}
+
+// NEW: Arbitrage Types
+interface ArbitrageRow {
+  id: number;
+  run_id: string;
+  market_slug: string;
+  yes_price: number;
+  no_price: number;
+  sum: number;
+  profit: number;
+  profit_percent: number;
+  executed: boolean;
+  executed_at?: string;
+  profit_realized?: number;
+  ts: string;
+}
+
+// NEW: Strategy Performance Types
+interface StrategyPerformanceRow {
+  id: number;
+  run_id: string;
+  strategy_name: string;
+  allocation: number;
+  pnl: number;
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  roi: number;
+  total_invested: number;
+  total_returned: number;
+  ts: string;
+}
+
+/* ========================= DASHBOARD ========================= */
 export const Dashboard: React.FC = () => {
+  // Existing state
   const [bankroll, setBankroll] = useState<BankrollRow | null>(null);
   const [settlements, setSettlements] = useState<SettlementRow[]>([]);
   const [ticks, setTicks] = useState<Tick[]>([]);
   const [valuations, setValuations] = useState<ValuationRow[]>([]);
-
-  // Lifetime (cross-run) snapshots / aggregates
   const [lifetimeStartBankroll, setLifetimeStartBankroll] = useState<number | null>(null);
   const [lifetimeLatestAnyBankroll, setLifetimeLatestAnyBankroll] = useState<BankrollRow | null>(null);
   const [lifetimeRealizedPnl, setLifetimeRealizedPnl] = useState<number>(0);
   const [errLifetime, setErrLifetime] = useState<string | null>(null);
-
-  // Runs + selection
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
-
-  // Cap control (dashboard)
   const [capInput, setCapInput] = useState<number>(500);
   const [capMsg, setCapMsg] = useState<string | null>(null);
-
-  // Connection / debugging truth (so you’re not guessing)
   const [errRun, setErrRun] = useState<string | null>(null);
   const [errBankroll, setErrBankroll] = useState<string | null>(null);
   const [errSettlements, setErrSettlements] = useState<string | null>(null);
   const [errTicks, setErrTicks] = useState<string | null>(null);
   const [errValuations, setErrValuations] = useState<string | null>(null);
 
+  // NEW: Oracle Lag State
+  const [oracleLag, setOracleLag] = useState<OracleLagRow[]>([]);
+  const [errOracleLag, setErrOracleLag] = useState<string | null>(null);
+
+  // NEW: Arbitrage State
+  const [arbitrageOpportunities, setArbitrageOpportunities] = useState<ArbitrageRow[]>([]);
+  const [errArbitrage, setErrArbitrage] = useState<string | null>(null);
+
+  // NEW: Strategy Performance State
+  const [strategyPerformance, setStrategyPerformance] = useState<StrategyPerformanceRow[]>([]);
+  const [errStrategyPerformance, setErrStrategyPerformance] = useState<string | null>(null);
+
   const connected = useMemo(() => {
-    const keyLooksReal =
-      typeof resolvedKey === "string" &&
-      resolvedKey.length > 50 &&
-      !resolvedKey.includes("PASTE_YOUR_REAL_ANON_KEY_HERE") &&
-      !resolvedKey.includes("YOUR_ANON_KEY_HERE");
-
-    const any401 =
-      (errRun || "").includes("401") ||
-      (errTicks || "").includes("401") ||
-      (errBankroll || "").includes("401") ||
-      (errSettlements || "").includes("401") ||
-      (errValuations || "").includes("401") ||
-      (errLifetime || "").includes("401");
-
+    const keyLooksReal = typeof resolvedKey === "string" && resolvedKey.length > 50 && !resolvedKey.includes("PASTE_YOUR_REAL_ANON_KEY_HERE") && !resolvedKey.includes("YOUR_ANON_KEY_HERE");
+    const any401 = (errRun || "").includes("401") || (errTicks || "").includes("401") || (errBankroll || "").includes("401") || (errSettlements || "").includes("401") || (errValuations || "").includes("401") || (errLifetime || "").includes("401") || (errOracleLag || "").includes("401") || (errArbitrage || "").includes("401") || (errStrategyPerformance || "").includes("401");
     return keyLooksReal && !any401;
-  }, [errRun, errBankroll, errSettlements, errTicks, errValuations, errLifetime]);
+  }, [errRun, errBankroll, errSettlements, errTicks, errValuations, errLifetime, errOracleLag, errArbitrage, errStrategyPerformance]);
 
-  /* =========================
-    RUN DISCOVERY + SELECTOR
-  ========================= */
+  /* ========================= RUN DISCOVERY + SELECTOR ========================= */
   useEffect(() => {
     let stop = false;
-
     async function loadRuns() {
       try {
         const { data, error } = await supabase
@@ -144,23 +159,17 @@ export const Dashboard: React.FC = () => {
           .select("run_id,status,created_at")
           .order("created_at", { ascending: false })
           .limit(15);
-
         if (stop) return;
-
         if (error) {
           setErrRun(formatSbError("bot_runs", error));
           setRuns([]);
           return;
         }
-
         setErrRun(null);
         const rows = (data || []) as any as RunRow[];
         setRuns(rows);
-
         if (!runId) {
-          const running = rows.find(
-            (r) => String(r.status).toUpperCase() === "RUNNING"
-          );
+          const running = rows.find((r) => String(r.status).toUpperCase() === "RUNNING");
           const fallback = rows[0];
           const next = (running?.run_id || fallback?.run_id || null) as any;
           setRunId(next);
@@ -171,53 +180,42 @@ export const Dashboard: React.FC = () => {
         setRuns([]);
       }
     }
-
     loadRuns();
     const i = setInterval(loadRuns, 5000);
-    return () => {
-      stop = true;
-      clearInterval(i);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => { stop = true; clearInterval(i); };
   }, [runId]);
 
-  // when runId changes, hard-reset UI state
   useEffect(() => {
     setBankroll(null);
     setSettlements([]);
     setTicks([]);
     setValuations([]);
+    setOracleLag([]);
+    setArbitrageOpportunities([]);
+    setStrategyPerformance([]);
     setErrBankroll(null);
     setErrSettlements(null);
     setErrTicks(null);
     setErrValuations(null);
+    setErrOracleLag(null);
+    setErrArbitrage(null);
+    setErrStrategyPerformance(null);
     setCapMsg(null);
   }, [runId]);
 
-  // Sync cap input from latest bankroll row (if available)
   useEffect(() => {
-    if (
-      bankroll?.cap_per_market != null &&
-      Number.isFinite(Number(bankroll.cap_per_market))
-    ) {
+    if (bankroll?.cap_per_market != null && Number.isFinite(Number(bankroll.cap_per_market))) {
       setCapInput(Number(bankroll.cap_per_market));
     }
   }, [bankroll]);
 
-  /* =========================
-    DATA LOADERS (run-scoped)
-  ========================= */
-
+  /* ========================= DATA LOADERS (run-scoped) ========================= */
   // Bankroll (run-scoped)
   useEffect(() => {
     let stop = false;
     async function loadBankroll() {
       try {
-        if (!runId) {
-          setBankroll(null);
-          return;
-        }
-
+        if (!runId) { setBankroll(null); return; }
         const { data, error } = await supabase
           .from("bot_bankroll")
           .select("*")
@@ -225,14 +223,11 @@ export const Dashboard: React.FC = () => {
           .order("ts", { ascending: false })
           .limit(1)
           .maybeSingle();
-
         if (stop) return;
-
         if (error) {
           setErrBankroll(formatSbError("bot_bankroll", error));
           return;
         }
-
         setErrBankroll(null);
         setBankroll((data as any) ?? null);
       } catch (e: any) {
@@ -240,13 +235,9 @@ export const Dashboard: React.FC = () => {
         setErrBankroll(`bot_bankroll unexpected: ${String(e?.message ?? e)}`);
       }
     }
-
     loadBankroll();
     const i = setInterval(loadBankroll, 3000);
-    return () => {
-      stop = true;
-      clearInterval(i);
-    };
+    return () => { stop = true; clearInterval(i); };
   }, [runId]);
 
   // Settlements (run-scoped)
@@ -254,41 +245,28 @@ export const Dashboard: React.FC = () => {
     let stop = false;
     async function loadSettlements() {
       try {
-        if (!runId) {
-          setSettlements([]);
-          return;
-        }
-
+        if (!runId) { setSettlements([]); return; }
         const { data, error } = await supabase
           .from("bot_settlements")
           .select("*")
           .eq("run_id", runId)
           .order("settled_at", { ascending: false })
           .limit(50);
-
         if (stop) return;
-
         if (error) {
           setErrSettlements(formatSbError("bot_settlements", error));
           return;
         }
-
         setErrSettlements(null);
         setSettlements((data || []) as any);
       } catch (e: any) {
         if (stop) return;
-        setErrSettlements(
-          `bot_settlements unexpected: ${String(e?.message ?? e)}`
-        );
+        setErrSettlements(`bot_settlements unexpected: ${String(e?.message ?? e)}`);
       }
     }
-
     loadSettlements();
     const i = setInterval(loadSettlements, 5000);
-    return () => {
-      stop = true;
-      clearInterval(i);
-    };
+    return () => { stop = true; clearInterval(i); };
   }, [runId]);
 
   // Ticks (run-scoped)
@@ -296,25 +274,18 @@ export const Dashboard: React.FC = () => {
     let stop = false;
     async function loadTicks() {
       try {
-        if (!runId) {
-          setTicks([]);
-          return;
-        }
-
+        if (!runId) { setTicks([]); return; }
         const { data, error } = await supabase
           .from("bot_ticks")
           .select("*")
           .eq("run_id", runId)
           .order("created_at", { ascending: false })
           .limit(50);
-
         if (stop) return;
-
         if (error) {
           setErrTicks(formatSbError("bot_ticks", error));
           return;
         }
-
         setErrTicks(null);
         setTicks((data || []) as any);
       } catch (e: any) {
@@ -322,13 +293,9 @@ export const Dashboard: React.FC = () => {
         setErrTicks(`bot_ticks unexpected: ${String(e?.message ?? e)}`);
       }
     }
-
     loadTicks();
     const i = setInterval(loadTicks, 3000);
-    return () => {
-      stop = true;
-      clearInterval(i);
-    };
+    return () => { stop = true; clearInterval(i); };
   }, [runId]);
 
   // Valuations (run-scoped)
@@ -336,58 +303,122 @@ export const Dashboard: React.FC = () => {
     let stop = false;
     async function loadValuations() {
       try {
-        if (!runId) {
-          setValuations([]);
-          return;
-        }
-
+        if (!runId) { setValuations([]); return; }
         const { data, error } = await supabase
           .from("bot_unrealized_valuations")
-          .select(
-            "slug,ts,ts_bucket,unrealized_pnl,liquidation_value_net,pricing_quality,yes_bid_missing,no_bid_missing,run_id"
-          )
+          .select("slug,ts,ts_bucket,unrealized_pnl,liquidation_value_net,pricing_quality,yes_bid_missing,no_bid_missing,run_id")
           .eq("run_id", runId)
           .order("ts", { ascending: false })
           .limit(500);
-
         if (stop) return;
-
         if (error) {
           setErrValuations(formatSbError("bot_unrealized_valuations", error));
           return;
         }
-
         setErrValuations(null);
         setValuations((data || []) as any);
       } catch (e: any) {
         if (stop) return;
-        setErrValuations(
-          `bot_unrealized_valuations unexpected: ${String(e?.message ?? e)}`
-        );
+        setErrValuations(`bot_unrealized_valuations unexpected: ${String(e?.message ?? e)}`);
       }
     }
-
     loadValuations();
     const i = setInterval(loadValuations, 3000);
-    return () => {
-      stop = true;
-      clearInterval(i);
-    };
+    return () => { stop = true; clearInterval(i); };
   }, [runId]);
 
-  /* =========================
-    LIFETIME LOADERS (cross-run)
-    - realized pnl: sum of all settlements.pnl (paged)
-    - start bankroll baseline: earliest engine bankroll row (fallback 1000)
-    - latest exposure: latest bankroll row overall
-  ========================= */
+  // NEW: Oracle Lag (run-scoped)
   useEffect(() => {
     let stop = false;
+    async function loadOracleLag() {
+      try {
+        if (!runId) { setOracleLag([]); return; }
+        const { data, error } = await supabase
+          .from("bot_oracle_lag")
+          .select("*")
+          .eq("run_id", runId)
+          .order("ts", { ascending: false })
+          .limit(100);
+        if (stop) return;
+        if (error) {
+          setErrOracleLag(formatSbError("bot_oracle_lag", error));
+          return;
+        }
+        setErrOracleLag(null);
+        setOracleLag((data || []) as any);
+      } catch (e: any) {
+        if (stop) return;
+        setErrOracleLag(`bot_oracle_lag unexpected: ${String(e?.message ?? e)}`);
+      }
+    }
+    loadOracleLag();
+    const i = setInterval(loadOracleLag, 60000); // Every minute
+    return () => { stop = true; clearInterval(i); };
+  }, [runId]);
 
+  // NEW: Arbitrage Opportunities (run-scoped)
+  useEffect(() => {
+    let stop = false;
+    async function loadArbitrage() {
+      try {
+        if (!runId) { setArbitrageOpportunities([]); return; }
+        const { data, error } = await supabase
+          .from("bot_arbitrage_opportunities")
+          .select("*")
+          .eq("run_id", runId)
+          .order("ts", { ascending: false })
+          .limit(50);
+        if (stop) return;
+        if (error) {
+          setErrArbitrage(formatSbError("bot_arbitrage_opportunities", error));
+          return;
+        }
+        setErrArbitrage(null);
+        setArbitrageOpportunities((data || []) as any);
+      } catch (e: any) {
+        if (stop) return;
+        setErrArbitrage(`bot_arbitrage_opportunities unexpected: ${String(e?.message ?? e)}`);
+      }
+    }
+    loadArbitrage();
+    const i = setInterval(loadArbitrage, 10000); // Every 10 seconds
+    return () => { stop = true; clearInterval(i); };
+  }, [runId]);
+
+  // NEW: Strategy Performance (run-scoped)
+  useEffect(() => {
+    let stop = false;
+    async function loadStrategyPerformance() {
+      try {
+        if (!runId) { setStrategyPerformance([]); return; }
+        const { data, error } = await supabase
+          .from("bot_strategy_performance")
+          .select("*")
+          .eq("run_id", runId)
+          .order("ts", { ascending: false })
+          .limit(20);
+        if (stop) return;
+        if (error) {
+          setErrStrategyPerformance(formatSbError("bot_strategy_performance", error));
+          return;
+        }
+        setErrStrategyPerformance(null);
+        setStrategyPerformance((data || []) as any);
+      } catch (e: any) {
+        if (stop) return;
+        setErrStrategyPerformance(`bot_strategy_performance unexpected: ${String(e?.message ?? e)}`);
+      }
+    }
+    loadStrategyPerformance();
+    const i = setInterval(loadStrategyPerformance, 60000); // Every minute
+    return () => { stop = true; clearInterval(i); };
+  }, [runId]);
+
+  /* ========================= LIFETIME LOADERS (cross-run) ========================= */
+  useEffect(() => {
+    let stop = false;
     async function loadLifetime() {
       try {
-        // 1) Baseline starting bankroll (earliest engine row)
-        // If no engine rows exist, fallback to 1000.
         const { data: startData, error: startErr } = await supabase
           .from("bot_bankroll")
           .select("bankroll,ts,source")
@@ -395,9 +426,7 @@ export const Dashboard: React.FC = () => {
           .order("ts", { ascending: true })
           .limit(1)
           .maybeSingle();
-
         if (stop) return;
-
         if (startErr) {
           setErrLifetime(formatSbError("lifetime(bot_bankroll start)", startErr));
         } else {
@@ -406,16 +435,13 @@ export const Dashboard: React.FC = () => {
           setErrLifetime(null);
         }
 
-        // 2) Latest bankroll row across any run (for lifetime "current exposure")
         const { data: latestData, error: latestErr } = await supabase
           .from("bot_bankroll")
           .select("*")
           .order("ts", { ascending: false })
           .limit(1)
           .maybeSingle();
-
         if (stop) return;
-
         if (latestErr) {
           setErrLifetime(formatSbError("lifetime(bot_bankroll latest)", latestErr));
         } else {
@@ -423,10 +449,8 @@ export const Dashboard: React.FC = () => {
           setErrLifetime(null);
         }
 
-        // 3) Lifetime realized pnl: sum of all settlements pnl (paged to avoid silent truncation)
-        // We fetch only the pnl column for efficiency.
         const pageSize = 1000;
-        const maxPages = 50; // hard safety cap: up to 50k rows
+        const maxPages = 50;
         let from = 0;
         let total = 0;
         for (let page = 0; page < maxPages; page++) {
@@ -434,24 +458,18 @@ export const Dashboard: React.FC = () => {
             .from("bot_settlements")
             .select("pnl")
             .range(from, from + pageSize - 1);
-
           if (stop) return;
-
           if (pnlErr) {
             setErrLifetime(formatSbError("lifetime(bot_settlements pnl)", pnlErr));
             break;
           }
-
           const arr = (pnlRows || []) as any[];
           for (const r of arr) total += Number(r?.pnl || 0);
-
           if (arr.length < pageSize) {
-            // done
             setLifetimeRealizedPnl(total);
             setErrLifetime(null);
             break;
           }
-
           from += pageSize;
         }
       } catch (e: any) {
@@ -459,32 +477,16 @@ export const Dashboard: React.FC = () => {
         setErrLifetime(`lifetime unexpected: ${String(e?.message ?? e)}`);
       }
     }
-
     loadLifetime();
     const i = setInterval(loadLifetime, 8000);
-    return () => {
-      stop = true;
-      clearInterval(i);
-    };
+    return () => { stop = true; clearInterval(i); };
   }, []);
 
-  /* =========================
-    CAP CONTROL ACTION
-  ========================= */
+  /* ========================= CAP CONTROL ACTION ========================= */
   async function writeCapPerMarket() {
-    if (!runId) {
-      setCapMsg("No run selected.");
-      return;
-    }
-    if (!bankroll) {
-      setCapMsg("No bankroll row loaded yet (wait 1–2 seconds).");
-      return;
-    }
-    if (!Number.isFinite(Number(capInput)) || Number(capInput) <= 0) {
-      setCapMsg("Invalid cap value.");
-      return;
-    }
-
+    if (!runId) { setCapMsg("No run selected."); return; }
+    if (!bankroll) { setCapMsg("No bankroll row loaded yet (wait 1–2 seconds)."); return; }
+    if (!Number.isFinite(Number(capInput)) || Number(capInput) <= 0) { setCapMsg("Invalid cap value."); return; }
     try {
       const payload = {
         run_id: runId,
@@ -492,40 +494,24 @@ export const Dashboard: React.FC = () => {
         bankroll: Number(bankroll.bankroll),
         exposure: Number(bankroll.exposure),
         cap_per_market: Number(capInput),
-        source: "dashboard", // REQUIRED BY YOUR RLS INSERT POLICY
+        source: "dashboard",
       };
-
       const { error } = await supabase.from("bot_bankroll").insert(payload as any);
-
       if (error) {
         setCapMsg(`Write failed: ${error.message}`);
         return;
       }
-
-      setCapMsg(
-        `OK: cap_per_market set to ${Number(capInput).toFixed(
-          2
-        )} (new bankroll row inserted)`
-      );
+      setCapMsg(`OK: cap_per_market set to ${Number(capInput).toFixed(2)} (new bankroll row inserted)`);
     } catch (e: any) {
       setCapMsg(`Write failed: ${String(e?.message ?? e)}`);
     }
   }
 
-  /* =========================
-    METRICS
-    IMPORTANT: Do NOT blank these just because exposure is 0.
-    Exposure=0 is a valid state between markets.
-  ========================= */
-
-  // RUN-scoped realized pnl
+  /* ========================= METRICS ========================= */
   const realizedPnl = useMemo(() => {
     return settlements.reduce((a, s) => a + Number(s.pnl || 0), 0);
   }, [settlements]);
 
-  // RUN-scoped estimated return:
-  // Use the latest tick per slug, then sum expected_pnl.
-  // This avoids "meaningless" inflation from counting many ticks for the same market.
   const estimatedReturn = useMemo(() => {
     const latestBySlug = new Map<string, Tick>();
     for (const t of ticks) {
@@ -536,7 +522,6 @@ export const Dashboard: React.FC = () => {
     return sum;
   }, [ticks]);
 
-  // Compute latest valuation per slug (client-side)
   const totalUnrealizedPnl = useMemo(() => {
     const latestBySlug = new Map<string, ValuationRow>();
     for (const v of valuations) {
@@ -548,77 +533,81 @@ export const Dashboard: React.FC = () => {
   }, [valuations]);
 
   const openPositionCost = bankroll?.exposure ?? 0;
-
-  // LIFETIME metrics (explicit)
   const lifetimeOpenPositionCost = lifetimeLatestAnyBankroll?.exposure ?? 0;
 
-  // Lifetime strategy equity baseline:
-  // - Prefer earliest engine bankroll row (lifetimeStartBankroll)
-  // - Fallback to 1000 if unavailable
   const lifetimeEquity = useMemo(() => {
-    const base = Number.isFinite(Number(lifetimeStartBankroll))
-      ? Number(lifetimeStartBankroll)
-      : 1000;
+    const base = Number.isFinite(Number(lifetimeStartBankroll)) ? Number(lifetimeStartBankroll) : 1000;
     return base + Number(lifetimeRealizedPnl || 0);
   }, [lifetimeStartBankroll, lifetimeRealizedPnl]);
 
+  // NEW: Oracle Lag Metrics
+  const oracleLagStats = useMemo(() => {
+    if (oracleLag.length === 0) return null;
+    const recent = oracleLag.slice(0, 10);
+    const avgLag = recent.reduce((sum, l) => sum + l.lag_ms, 0) / recent.length;
+    const minLag = Math.min(...recent.map(l => l.lag_ms));
+    const maxLag = Math.max(...recent.map(l => l.lag_ms));
+    const bySource: Record<string, number[]> = {};
+    for (const l of recent) {
+      if (!bySource[l.source]) bySource[l.source] = [];
+      bySource[l.source].push(l.lag_ms);
+    }
+    const sourceAverages: Record<string, number> = {};
+    for (const [source, lags] of Object.entries(bySource)) {
+      sourceAverages[source] = lags.reduce((sum, lag) => sum + lag, 0) / lags.length;
+    }
+    const edgeValid = avgLag >= 1000; // Edge valid if avg lag >= 1 second
+    return { avgLag, minLag, maxLag, sourceAverages, edgeValid, count: recent.length };
+  }, [oracleLag]);
+
+  // NEW: Arbitrage Metrics
+  const arbitrageStats = useMemo(() => {
+    if (arbitrageOpportunities.length === 0) return null;
+    const executed = arbitrageOpportunities.filter(a => a.executed);
+    const totalProfit = executed.reduce((sum, a) => sum + Number(a.profit_realized || 0), 0);
+    const successRate = arbitrageOpportunities.length > 0 ? (executed.length / arbitrageOpportunities.length) * 100 : 0;
+    return {
+      totalFound: arbitrageOpportunities.length,
+      totalExecuted: executed.length,
+      totalProfit,
+      successRate,
+      avgProfit: executed.length > 0 ? totalProfit / executed.length : 0,
+    };
+  }, [arbitrageOpportunities]);
+
+  // NEW: Strategy Performance Metrics
+  const latestStrategyPerformance = useMemo(() => {
+    if (strategyPerformance.length === 0) return null;
+    const byStrategy: Record<string, StrategyPerformanceRow> = {};
+    for (const perf of strategyPerformance) {
+      if (!byStrategy[perf.strategy_name] || new Date(perf.ts) > new Date(byStrategy[perf.strategy_name].ts)) {
+        byStrategy[perf.strategy_name] = perf;
+      }
+    }
+    return byStrategy;
+  }, [strategyPerformance]);
+
   const banner = useMemo(() => {
-    const keyLooksPlaceholder =
-      resolvedKey.includes("PASTE_YOUR_REAL_ANON_KEY_HERE") ||
-      resolvedKey.includes("YOUR_ANON_KEY_HERE");
-
+    const keyLooksPlaceholder = resolvedKey.includes("PASTE_YOUR_REAL_ANON_KEY_HERE") || resolvedKey.includes("YOUR_ANON_KEY_HERE");
     if (keyLooksPlaceholder) {
-      return {
-        kind: "bad" as const,
-        text:
-          "Dashboard is using a placeholder SUPABASE_ANON_KEY. Paste your real anon key. (401 is guaranteed until you do.)",
-      };
+      return { kind: "bad" as const, text: "Dashboard is using a placeholder SUPABASE_ANON_KEY. Paste your real anon key. (401 is guaranteed until you do.)" };
     }
-
-    const any401 =
-      (errRun || "").includes("401") ||
-      (errTicks || "").includes("401") ||
-      (errBankroll || "").includes("401") ||
-      (errSettlements || "").includes("401") ||
-      (errValuations || "").includes("401") ||
-      (errLifetime || "").includes("401");
-
+    const any401 = (errRun || "").includes("401") || (errTicks || "").includes("401") || (errBankroll || "").includes("401") || (errSettlements || "").includes("401") || (errValuations || "").includes("401") || (errLifetime || "").includes("401") || (errOracleLag || "").includes("401") || (errArbitrage || "").includes("401") || (errStrategyPerformance || "").includes("401");
     if (any401) {
-      return {
-        kind: "bad" as const,
-        text: "Supabase is returning 401 (unauthorized). Your anon key is missing/invalid for this project.",
-      };
+      return { kind: "bad" as const, text: "Supabase is returning 401 (unauthorized). Your anon key is missing/invalid for this project." };
     }
-
-    const any403 =
-      (errRun || "").includes("403") ||
-      (errTicks || "").includes("403") ||
-      (errBankroll || "").includes("403") ||
-      (errSettlements || "").includes("403") ||
-      (errValuations || "").includes("403") ||
-      (errLifetime || "").includes("403");
-
+    const any403 = (errRun || "").includes("403") || (errTicks || "").includes("403") || (errBankroll || "").includes("403") || (errSettlements || "").includes("403") || (errValuations || "").includes("403") || (errLifetime || "").includes("403") || (errOracleLag || "").includes("403") || (errArbitrage || "").includes("403") || (errStrategyPerformance || "").includes("403");
     if (any403) {
-      return {
-        kind: "warn" as const,
-        text:
-          "Supabase is returning 403 (forbidden). This is RLS/policy. The key is valid but reads are blocked.",
-      };
+      return { kind: "warn" as const, text: "Supabase is returning 403 (forbidden). This is RLS/policy. The key is valid but reads are blocked." };
     }
-
     if (!runId) {
       return { kind: "warn" as const, text: "No run selected (bot_runs empty or not readable)." };
     }
-
-    if (errRun || errTicks || errBankroll || errSettlements || errValuations || errLifetime) {
-      return {
-        kind: "warn" as const,
-        text: "Dashboard is running but at least one query is failing. Scroll down to see exact errors.",
-      };
+    if (errRun || errTicks || errBankroll || errSettlements || errValuations || errLifetime || errOracleLag || errArbitrage || errStrategyPerformance) {
+      return { kind: "warn" as const, text: "Dashboard is running but at least one query is failing. Scroll down to see exact errors." };
     }
-
     return { kind: "ok" as const, text: "Supabase reads OK." };
-  }, [errRun, errBankroll, errSettlements, errTicks, errValuations, errLifetime, runId]);
+  }, [errRun, errBankroll, errSettlements, errTicks, errValuations, errLifetime, errOracleLag, errArbitrage, errStrategyPerformance, runId]);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-200 p-6">
@@ -627,43 +616,24 @@ export const Dashboard: React.FC = () => {
           <Shield className="text-emerald-500" />
           BOT TRUTH DASHBOARD
         </h1>
-        <span
-          className={`text-xs px-2 py-1 rounded ${
-            connected ? "bg-emerald-900 text-emerald-200" : "bg-red-900 text-red-200"
-          }`}
-        >
+        <span className={`text-xs px-2 py-1 rounded ${connected ? "bg-emerald-900 text-emerald-200" : "bg-red-900 text-red-200"}`}>
           {connected ? "CONNECTED" : "DISCONNECTED"}
         </span>
       </div>
 
       {/* STATUS BANNER */}
-      <div
-        className={`mb-6 rounded border p-3 text-sm ${
-          banner.kind === "ok"
-            ? "border-emerald-800 bg-emerald-950/40 text-emerald-200"
-            : banner.kind === "warn"
-            ? "border-yellow-800 bg-yellow-950/30 text-yellow-200"
-            : "border-red-800 bg-red-950/30 text-red-200"
-        }`}
-      >
+      <div className={`mb-6 rounded border p-3 text-sm ${banner.kind === "ok" ? "border-emerald-800 bg-emerald-950/40 text-emerald-200" : banner.kind === "warn" ? "border-yellow-800 bg-yellow-950/30 text-yellow-200" : "border-red-800 bg-red-950/30 text-red-200"}`}>
         <div className="flex items-center gap-2">
           {banner.kind === "ok" ? <CheckCircle className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
           <div>{banner.text}</div>
         </div>
-
         <div className="mt-2 text-xs opacity-80 font-mono">
-          url={resolvedUrl} | keyLen={resolvedKey?.length ?? 0}
-          {runId ? ` | run_id=${runId}` : ""}
+          url={resolvedUrl} | keyLen={resolvedKey?.length ?? 0} {runId ? ` | run_id=${runId}` : ""}
         </div>
-
         {/* RUN SELECTOR */}
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
           <div className="font-mono text-zinc-400">Run:</div>
-          <select
-            className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs"
-            value={runId ?? ""}
-            onChange={(e) => setRunId(e.target.value || null)}
-          >
+          <select className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs" value={runId ?? ""} onChange={(e) => setRunId(e.target.value || null)}>
             {runs.map((r) => (
               <option key={r.run_id} value={r.run_id}>
                 {r.status} | {r.run_id.slice(0, 8)}… | {new Date(r.created_at).toLocaleString()}
@@ -675,52 +645,18 @@ export const Dashboard: React.FC = () => {
       </div>
 
       {/* ================= METRICS ================= */}
-      {/* Primary (RUN-scoped) row - emphasized */}
       <div className="grid grid-cols-4 gap-4 mb-3">
-        <Metric
-          label="Strategy Equity (Run)"
-          value={bankroll ? Number(bankroll.bankroll).toFixed(2) : "--"}
-          size="lg"
-        />
-        <Metric
-          label="Open Position Cost (Run)"
-          value={bankroll ? Number(openPositionCost).toFixed(2) : "--"}
-          size="lg"
-        />
-        <Metric
-          label="Estimated Return (Run)"
-          value={Number(estimatedReturn).toFixed(2)}
-          size="lg"
-        />
-        <Metric
-          label="Realized PnL (Run)"
-          value={Number(realizedPnl).toFixed(2)}
-          size="lg"
-        />
+        <Metric label="Strategy Equity (Run)" value={bankroll ? Number(bankroll.bankroll).toFixed(2) : "--"} size="lg" />
+        <Metric label="Open Position Cost (Run)" value={bankroll ? Number(openPositionCost).toFixed(2) : "--"} size="lg" />
+        <Metric label="Estimated Return (Run)" value={Number(estimatedReturn).toFixed(2)} size="lg" />
+        <Metric label="Realized PnL (Run)" value={Number(realizedPnl).toFixed(2)} size="lg" />
       </div>
 
-      {/* Secondary (LIFETIME) row - smaller/labeled */}
       <div className="grid grid-cols-4 gap-4 mb-6 opacity-80">
-        <Metric
-          label="Strategy Equity (Lifetime)"
-          value={Number(lifetimeEquity).toFixed(2)}
-          size="sm"
-        />
-        <Metric
-          label="Open Position Cost (Lifetime)"
-          value={Number(lifetimeOpenPositionCost).toFixed(2)}
-          size="sm"
-        />
-        <Metric
-          label="Estimated Return (Lifetime)"
-          value={"N/A"}
-          size="sm"
-        />
-        <Metric
-          label="Realized PnL (Lifetime)"
-          value={Number(lifetimeRealizedPnl).toFixed(2)}
-          size="sm"
-        />
+        <Metric label="Strategy Equity (Lifetime)" value={Number(lifetimeEquity).toFixed(2)} size="sm" />
+        <Metric label="Open Position Cost (Lifetime)" value={Number(lifetimeOpenPositionCost).toFixed(2)} size="sm" />
+        <Metric label="Estimated Return (Lifetime)" value={"N/A"} size="sm" />
+        <Metric label="Realized PnL (Lifetime)" value={Number(lifetimeRealizedPnl).toFixed(2)} size="sm" />
       </div>
 
       <div className="text-[11px] text-zinc-500 mb-6">
@@ -729,58 +665,187 @@ export const Dashboard: React.FC = () => {
         <span className="ml-2 text-zinc-600">(total uPnL latest-by-slug: {totalUnrealizedPnl.toFixed(4)})</span>
       </div>
 
+      {/* ================= NEW: ORACLE LAG MONITOR ================= */}
+      <div className="bg-black border border-zinc-800 rounded p-4 mb-8">
+        <h2 className="text-sm text-zinc-400 mb-3 flex items-center gap-2">
+          <Clock className="text-blue-400" />
+          Oracle Lag Monitor
+        </h2>
+        {errOracleLag && <ErrorBox title="bot_oracle_lag error" text={errOracleLag} />}
+        {oracleLagStats ? (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <div className="text-xs text-zinc-500">Average Lag</div>
+              <div className="text-lg font-mono">{oracleLagStats.avgLag.toFixed(0)}ms</div>
+            </div>
+            <div>
+              <div className="text-xs text-zinc-500">Range</div>
+              <div className="text-lg font-mono">{oracleLagStats.minLag}ms - {oracleLagStats.maxLag}ms</div>
+            </div>
+            <div>
+              <div className="text-xs text-zinc-500">Edge Status</div>
+              <div className={`text-lg font-mono ${oracleLagStats.edgeValid ? "text-emerald-400" : "text-yellow-400"}`}>
+                {oracleLagStats.edgeValid ? "✅ VALID" : "⚠️ DEGRADED"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-zinc-500">Measurements</div>
+              <div className="text-lg font-mono">{oracleLagStats.count}</div>
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs text-zinc-500">No oracle lag data yet</div>
+        )}
+        {oracleLagStats && Object.keys(oracleLagStats.sourceAverages).length > 0 && (
+          <div className="mt-4">
+            <div className="text-xs text-zinc-500 mb-2">Lag by Source:</div>
+            <div className="flex flex-wrap gap-3">
+              {Object.entries(oracleLagStats.sourceAverages).map(([source, avg]) => (
+                <div key={source} className="text-xs">
+                  <span className="text-zinc-400">{source}:</span> <span className="font-mono">{avg.toFixed(0)}ms</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ================= NEW: ARBITRAGE OPPORTUNITIES ================= */}
+      <div className="bg-black border border-zinc-800 rounded p-4 mb-8">
+        <h2 className="text-sm text-zinc-400 mb-3 flex items-center gap-2">
+          <DollarSign className="text-green-400" />
+          Arbitrage Opportunities
+        </h2>
+        {errArbitrage && <ErrorBox title="bot_arbitrage_opportunities error" text={errArbitrage} />}
+        {arbitrageStats ? (
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
+            <div>
+              <div className="text-xs text-zinc-500">Found</div>
+              <div className="text-lg font-mono">{arbitrageStats.totalFound}</div>
+            </div>
+            <div>
+              <div className="text-xs text-zinc-500">Executed</div>
+              <div className="text-lg font-mono">{arbitrageStats.totalExecuted}</div>
+            </div>
+            <div>
+              <div className="text-xs text-zinc-500">Total Profit</div>
+              <div className="text-lg font-mono text-emerald-400">${arbitrageStats.totalProfit.toFixed(2)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-zinc-500">Success Rate</div>
+              <div className="text-lg font-mono">{arbitrageStats.successRate.toFixed(1)}%</div>
+            </div>
+            <div>
+              <div className="text-xs text-zinc-500">Avg Profit</div>
+              <div className="text-lg font-mono">${arbitrageStats.avgProfit.toFixed(2)}</div>
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs text-zinc-500 mb-4">No arbitrage opportunities yet</div>
+        )}
+        <div className="max-h-48 overflow-y-auto">
+          <table className="w-full text-xs font-mono">
+            <thead className="bg-zinc-900 sticky top-0">
+              <tr>
+                <th className="p-2 text-left">Market</th>
+                <th className="p-2">YES</th>
+                <th className="p-2">NO</th>
+                <th className="p-2">Profit %</th>
+                <th className="p-2">Status</th>
+                <th className="p-2">Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {arbitrageOpportunities.slice(0, 10).map((a) => (
+                <tr key={a.id} className="border-t border-zinc-800">
+                  <td className="p-2 truncate max-w-[200px]">{a.market_slug}</td>
+                  <td className="p-2 text-center">${Number(a.yes_price).toFixed(3)}</td>
+                  <td className="p-2 text-center">${Number(a.no_price).toFixed(3)}</td>
+                  <td className="p-2 text-center text-emerald-400">{Number(a.profit_percent).toFixed(2)}%</td>
+                  <td className="p-2 text-center">{a.executed ? <span className="text-emerald-400">✅ Executed</span> : <span className="text-yellow-400">⏳ Found</span>}</td>
+                  <td className="p-2 text-center">{new Date(a.ts).toLocaleTimeString()}</td>
+                </tr>
+              ))}
+              {arbitrageOpportunities.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="p-4 text-center text-zinc-500">No arbitrage opportunities yet</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ================= NEW: STRATEGY PERFORMANCE ================= */}
+      <div className="bg-black border border-zinc-800 rounded p-4 mb-8">
+        <h2 className="text-sm text-zinc-400 mb-3 flex items-center gap-2">
+          <TrendingUp className="text-purple-400" />
+          Strategy Performance
+        </h2>
+        {errStrategyPerformance && <ErrorBox title="bot_strategy_performance error" text={errStrategyPerformance} />}
+        {latestStrategyPerformance ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {Object.entries(latestStrategyPerformance).map(([name, perf]) => (
+              <div key={name} className="bg-zinc-900 border border-zinc-700 rounded p-3">
+                <div className="text-sm font-mono mb-2 capitalize">{name}</div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div>
+                    <div className="text-zinc-500">Allocation</div>
+                    <div className="font-mono">{(Number(perf.allocation) * 100).toFixed(1)}%</div>
+                  </div>
+                  <div>
+                    <div className="text-zinc-500">PnL</div>
+                    <div className={`font-mono ${Number(perf.pnl) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      ${Number(perf.pnl).toFixed(2)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-zinc-500">ROI</div>
+                    <div className={`font-mono ${Number(perf.roi) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {Number(perf.roi).toFixed(2)}%
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-zinc-500">Win Rate</div>
+                    <div className="font-mono">{Number(perf.win_rate).toFixed(1)}%</div>
+                  </div>
+                  <div>
+                    <div className="text-zinc-500">Trades</div>
+                    <div className="font-mono">{perf.trades}</div>
+                  </div>
+                  <div>
+                    <div className="text-zinc-500">Wins/Losses</div>
+                    <div className="font-mono">{perf.wins}/{perf.losses}</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-xs text-zinc-500">No strategy performance data yet</div>
+        )}
+      </div>
+
       {/* ================= CAP CONTROL ================= */}
       <div className="bg-black border border-zinc-800 rounded p-4 mb-8">
         <h2 className="text-sm text-zinc-400 mb-3">Risk Control (cap_per_market)</h2>
-
         <div className="flex flex-wrap items-center gap-3">
           <div className="text-xs text-zinc-500 font-mono">
-            current cap:{" "}
-            <span className="text-zinc-200">
-              {bankroll ? Number(bankroll.cap_per_market).toFixed(2) : "--"}
-            </span>
+            current cap: <span className="text-zinc-200">{bankroll ? Number(bankroll.cap_per_market).toFixed(2) : "--"}</span>
           </div>
-
           <div className="flex items-center gap-2">
-            <button
-              className="bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 px-2 py-1 rounded text-xs"
-              onClick={() => setCapInput(250)}
-            >
-              250
-            </button>
-            <button
-              className="bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 px-2 py-1 rounded text-xs"
-              onClick={() => setCapInput(500)}
-            >
-              500
-            </button>
+            <button className="bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 px-2 py-1 rounded text-xs" onClick={() => setCapInput(250)}>250</button>
+            <button className="bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 px-2 py-1 rounded text-xs" onClick={() => setCapInput(500)}>500</button>
           </div>
-
           <div className="flex items-center gap-2">
-            <input
-              type="number"
-              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm w-32"
-              value={capInput}
-              onChange={(e) => setCapInput(Number(e.target.value))}
-              step={50}
-              min={0}
-            />
-            <button
-              onClick={writeCapPerMarket}
-              className="bg-emerald-900 hover:bg-emerald-800 text-emerald-200 px-3 py-1 rounded text-xs"
-            >
-              Set cap_per_market
-            </button>
+            <input type="number" className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm w-32" value={capInput} onChange={(e) => setCapInput(Number(e.target.value))} step={50} min={0} />
+            <button onClick={writeCapPerMarket} className="bg-emerald-900 hover:bg-emerald-800 text-emerald-200 px-3 py-1 rounded text-xs">Set cap_per_market</button>
           </div>
         </div>
-
         <div className="text-[11px] text-zinc-500 mt-2">
           This inserts a new <span className="font-mono">bot_bankroll</span> row with the chosen cap. Stop the bot before changing.
         </div>
-
-        {capMsg && (
-          <div className="mt-2 text-[11px] font-mono text-zinc-300">{capMsg}</div>
-        )}
+        {capMsg && <div className="mt-2 text-[11px] font-mono text-zinc-300">{capMsg}</div>}
       </div>
 
       {/* ================= SETTLED MARKETS ================= */}
@@ -815,9 +880,7 @@ export const Dashboard: React.FC = () => {
               ))}
               {settlements.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="p-4 text-center text-zinc-500">
-                    No markets settled yet
-                  </td>
+                  <td colSpan={5} className="p-4 text-center text-zinc-500">No markets settled yet</td>
                 </tr>
               )}
             </tbody>
@@ -825,7 +888,7 @@ export const Dashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* ================= RAW TICKS ================= */}
+      {/* ================= RAW TICKS (UPDATED WITH SPREAD) ================= */}
       <div className="bg-black border border-zinc-800 rounded p-4">
         <h2 className="text-xs text-zinc-500 mb-2">Raw Tick Telemetry</h2>
         {errTicks && <ErrorBox title="bot_ticks error" text={errTicks} />}
@@ -835,6 +898,9 @@ export const Dashboard: React.FC = () => {
               <th className="p-2 text-left">time</th>
               <th className="p-2 text-left">market</th>
               <th className="p-2">edge</th>
+              <th className="p-2">spread</th>
+              <th className="p-2">EV</th>
+              <th className="p-2">profitable</th>
               <th className="p-2">size</th>
             </tr>
           </thead>
@@ -844,14 +910,15 @@ export const Dashboard: React.FC = () => {
                 <td className="p-2">{new Date(t.created_at).toLocaleTimeString()}</td>
                 <td className="p-2 truncate max-w-[320px]">{t.slug}</td>
                 <td className="p-2 text-center">{Number(t.edge_after_fees).toFixed(4)}</td>
+                <td className="p-2 text-center">{t.spread_percent ? `${Number(t.spread_percent).toFixed(2)}%` : "--"}</td>
+                <td className="p-2 text-center">{t.expected_value ? Number(t.expected_value).toFixed(4) : "--"}</td>
+                <td className="p-2 text-center">{t.is_profitable !== null ? (t.is_profitable ? "✅" : "❌") : "--"}</td>
                 <td className="p-2 text-center">{Number(t.recommended_size).toFixed(2)}</td>
               </tr>
             ))}
             {ticks.length === 0 && (
               <tr>
-                <td colSpan={4} className="p-4 text-center text-zinc-500">
-                  No tick rows returned yet
-                </td>
+                <td colSpan={7} className="p-4 text-center text-zinc-500">No tick rows returned yet</td>
               </tr>
             )}
           </tbody>
@@ -885,9 +952,7 @@ export const Dashboard: React.FC = () => {
               ))}
               {valuations.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="p-4 text-center text-zinc-500">
-                    No valuation rows yet
-                  </td>
+                  <td colSpan={4} className="p-4 text-center text-zinc-500">No valuation rows yet</td>
                 </tr>
               )}
             </tbody>
@@ -904,8 +969,7 @@ export const Dashboard: React.FC = () => {
         <div className="text-xs font-mono text-zinc-400">Selected run_id: {runId ?? "--"}</div>
         <div className="text-xs font-mono text-zinc-400">Latest bankroll row ts: {bankroll?.ts ?? "--"}</div>
         <div className="text-xs font-mono text-zinc-400">
-          Lifetime baseline bankroll:{" "}
-          {Number.isFinite(Number(lifetimeStartBankroll)) ? Number(lifetimeStartBankroll).toFixed(2) : "--"}
+          Lifetime baseline bankroll: {Number.isFinite(Number(lifetimeStartBankroll)) ? Number(lifetimeStartBankroll).toFixed(2) : "--"}
         </div>
         <div className="text-xs font-mono text-zinc-400">
           Lifetime realized pnl (sum all settlements): {Number(lifetimeRealizedPnl).toFixed(2)}
@@ -915,17 +979,13 @@ export const Dashboard: React.FC = () => {
   );
 };
 
-/* =========================
-  SMALL COMPONENTS
-========================= */
+/* ========================= SMALL COMPONENTS ========================= */
 const Metric = ({ label, value, size }: any) => {
   const isSmall = String(size || "").toLowerCase() === "sm";
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded p-3">
       <div className="text-[10px] uppercase text-zinc-500">{label}</div>
-      <div className={`${isSmall ? "text-base" : "text-lg"} font-mono text-white`}>
-        {value ?? "--"}
-      </div>
+      <div className={`${isSmall ? "text-base" : "text-lg"} font-mono text-white`}>{value ?? "--"}</div>
     </div>
   );
 };
