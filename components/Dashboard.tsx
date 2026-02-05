@@ -838,7 +838,7 @@ export const Dashboard: React.FC = () => {
             <button className="bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 px-2 py-1 rounded text-xs" onClick={() => setCapInput(500)}>500</button>
           </div>
           <div className="flex items-center gap-2">
-            <input type="number" className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm w-32" value={capInput} onChange={(e) => setCapInput(Number(e.target.value))} step={50} min={0} />
+            <input type="number" className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm w-32" value={capInput} onChange={(e) => setCapInput(Number(e.target.value))} step={1} min={0} />
             <button onClick={writeCapPerMarket} className="bg-emerald-900 hover:bg-emerald-800 text-emerald-200 px-3 py-1 rounded text-xs">Set cap_per_market</button>
           </div>
         </div>
