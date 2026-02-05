@@ -645,19 +645,28 @@ export const Dashboard: React.FC = () => {
       </div>
 
       {/* ================= METRICS ================= */}
-      <div className="grid grid-cols-4 gap-4 mb-3">
-        <Metric label="Strategy Equity (Run)" value={bankroll ? Number(bankroll.bankroll).toFixed(2) : "--"} size="lg" />
-        <Metric label="Open Position Cost (Run)" value={bankroll ? Number(openPositionCost).toFixed(2) : "--"} size="lg" />
-        <Metric label="Estimated Return (Run)" value={Number(estimatedReturn).toFixed(2)} size="lg" />
-        <Metric label="Realized PnL (Run)" value={Number(realizedPnl).toFixed(2)} size="lg" />
-      </div>
+      {/* Strategy Equity = bankroll (available cash) + exposure (open positions) = total equity */}
+      {(() => {
+        const runEquity = bankroll ? Number(bankroll.bankroll) + Number(bankroll.exposure || 0) : null;
+        const lifetimeEquityWithExposure = Number(lifetimeEquity) + Number(lifetimeOpenPositionCost || 0);
+        return (
+          <>
+            <div className="grid grid-cols-4 gap-4 mb-3">
+              <Metric label="Strategy Equity (Run)" value={runEquity !== null ? runEquity.toFixed(2) : "--"} size="lg" />
+              <Metric label="Open Position Cost (Run)" value={bankroll ? Number(openPositionCost).toFixed(2) : "--"} size="lg" />
+              <Metric label="Estimated Return (Run)" value={Number(estimatedReturn).toFixed(2)} size="lg" />
+              <Metric label="Realized PnL (Run)" value={Number(realizedPnl).toFixed(2)} size="lg" />
+            </div>
 
-      <div className="grid grid-cols-4 gap-4 mb-6 opacity-80">
-        <Metric label="Strategy Equity (Lifetime)" value={Number(lifetimeEquity).toFixed(2)} size="sm" />
-        <Metric label="Open Position Cost (Lifetime)" value={Number(lifetimeOpenPositionCost).toFixed(2)} size="sm" />
-        <Metric label="Estimated Return (Lifetime)" value={"N/A"} size="sm" />
-        <Metric label="Realized PnL (Lifetime)" value={Number(lifetimeRealizedPnl).toFixed(2)} size="sm" />
-      </div>
+            <div className="grid grid-cols-4 gap-4 mb-6 opacity-80">
+              <Metric label="Strategy Equity (Lifetime)" value={lifetimeEquityWithExposure.toFixed(2)} size="sm" />
+              <Metric label="Open Position Cost (Lifetime)" value={Number(lifetimeOpenPositionCost).toFixed(2)} size="sm" />
+              <Metric label="Estimated Return (Lifetime)" value={"N/A"} size="sm" />
+              <Metric label="Realized PnL (Lifetime)" value={Number(lifetimeRealizedPnl).toFixed(2)} size="sm" />
+            </div>
+          </>
+        );
+      })()}
 
       <div className="text-[11px] text-zinc-500 mb-6">
         Unrealized PnL estimator: conservative bid-side liquidation value minus fee-equivalent taker fee estimate (15m crypto).
