@@ -61,6 +61,7 @@ interface ValuationRow {
   pricing_quality: string;
   yes_bid_missing: boolean;
   no_bid_missing: boolean;
+  total_cost?: number; // Added for position cost tracking
   run_id?: string;
 }
 
@@ -306,7 +307,7 @@ export const Dashboard: React.FC = () => {
         if (!runId) { setValuations([]); return; }
         const { data, error } = await supabase
           .from("bot_unrealized_valuations")
-          .select("slug,ts,ts_bucket,unrealized_pnl,liquidation_value_net,pricing_quality,yes_bid_missing,no_bid_missing,run_id")
+          .select("slug,ts,ts_bucket,unrealized_pnl,liquidation_value_net,pricing_quality,yes_bid_missing,no_bid_missing,total_cost,run_id")
           .eq("run_id", runId)
           .order("ts", { ascending: false })
           .limit(500);
@@ -938,39 +939,77 @@ export const Dashboard: React.FC = () => {
         </table>
       </div>
 
-      {/* ================= UNREALIZED VALUATIONS ================= */}
+      {/* ================= OPEN POSITIONS (ENHANCED) ================= */}
       <div className="bg-black border border-zinc-800 rounded p-4 mt-8">
-        <h2 className="text-xs text-zinc-500 mb-2">Unrealized Valuations (latest by slug)</h2>
+        <h2 className="text-xs text-zinc-500 mb-2 flex items-center gap-2">
+          <span className="text-emerald-400">●</span>
+          Open Positions (Tracked by Bot)
+        </h2>
         {errValuations && <ErrorBox title="bot_unrealized_valuations error" text={errValuations} />}
-        <div className="max-h-64 overflow-y-auto">
+        <div className="max-h-96 overflow-y-auto">
           <table className="w-full text-xs font-mono">
             <thead className="bg-zinc-900 sticky top-0">
               <tr>
-                <th className="p-2 text-left">time</th>
-                <th className="p-2 text-left">market</th>
-                <th className="p-2">uPnL</th>
-                <th className="p-2">quality</th>
+                <th className="p-2 text-left">Time</th>
+                <th className="p-2 text-left">Market</th>
+                <th className="p-2 text-right">Cost</th>
+                <th className="p-2 text-right">Current Value</th>
+                <th className="p-2 text-right">PnL</th>
+                <th className="p-2 text-right">PnL %</th>
+                <th className="p-2 text-center">Status</th>
               </tr>
             </thead>
             <tbody>
-              {valuations.slice(0, 20).map((v, i) => (
-                <tr key={i} className="border-t border-zinc-800">
-                  <td className="p-2">{new Date(v.ts).toLocaleTimeString()}</td>
-                  <td className="p-2 truncate max-w-[320px]">{v.slug}</td>
-                  <td className={`p-2 text-center ${Number(v.unrealized_pnl) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                    {Number(v.unrealized_pnl).toFixed(4)}
-                  </td>
-                  <td className="p-2 text-center">{v.pricing_quality}</td>
-                </tr>
-              ))}
+              {valuations.slice(0, 50).map((v, i) => {
+                const cost = Number(v.total_cost || 0);
+                const pnl = Number(v.unrealized_pnl || 0);
+                const currentValue = cost + pnl;
+                const pnlPercent = cost > 0 ? (pnl / cost) * 100 : 0;
+                const isProfitable = pnl >= 0;
+                const shouldExit = Math.abs(pnlPercent) >= 10; // 10% profit or loss
+                
+                return (
+                  <tr key={i} className={`border-t border-zinc-800 ${shouldExit ? 'bg-zinc-900' : ''}`}>
+                    <td className="p-2">{new Date(v.ts).toLocaleTimeString()}</td>
+                    <td className="p-2 truncate max-w-[200px]" title={v.slug}>{v.slug}</td>
+                    <td className="p-2 text-right">${cost.toFixed(2)}</td>
+                    <td className="p-2 text-right">${currentValue.toFixed(2)}</td>
+                    <td className={`p-2 text-right font-bold ${isProfitable ? "text-emerald-400" : "text-red-400"}`}>
+                      {isProfitable ? '+' : ''}${pnl.toFixed(2)}
+                    </td>
+                    <td className={`p-2 text-right font-bold ${isProfitable ? "text-emerald-400" : "text-red-400"}`}>
+                      {isProfitable ? '+' : ''}{pnlPercent.toFixed(1)}%
+                    </td>
+                    <td className="p-2 text-center">
+                      {shouldExit ? (
+                        <span className="text-yellow-400 font-bold">⚠️ EXIT</span>
+                      ) : (
+                        <span className="text-zinc-500">Holding</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
               {valuations.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="p-4 text-center text-zinc-500">No valuation rows yet</td>
+                  <td colSpan={7} className="p-4 text-center text-zinc-500">
+                    <div className="py-4">
+                      <div className="text-red-400 font-bold mb-2">⚠️ NO POSITIONS TRACKED</div>
+                      <div className="text-xs">If bot is trading but shows no positions here, positions are NOT being tracked!</div>
+                    </div>
+                  </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
+        {valuations.length > 0 && (
+          <div className="mt-2 text-xs text-zinc-500">
+            Total Positions: {valuations.length} | 
+            Total Cost: ${valuations.reduce((sum, v) => sum + Number(v.total_cost || 0), 0).toFixed(2)} | 
+            Total PnL: ${valuations.reduce((sum, v) => sum + Number(v.unrealized_pnl || 0), 0).toFixed(2)}
+          </div>
+        )}
       </div>
 
       {/* ================= DEBUG ================= */}
