@@ -645,28 +645,19 @@ export const Dashboard: React.FC = () => {
       </div>
 
       {/* ================= METRICS ================= */}
-      {/* Strategy Equity = bankroll (available cash) + exposure (open positions) = total equity */}
-      {(() => {
-        const runEquity = bankroll ? Number(bankroll.bankroll) + Number(bankroll.exposure || 0) : null;
-        const lifetimeEquityWithExposure = Number(lifetimeEquity) + Number(lifetimeOpenPositionCost || 0);
-        return (
-          <>
-            <div className="grid grid-cols-4 gap-4 mb-3">
-              <Metric label="Strategy Equity (Run)" value={runEquity !== null ? runEquity.toFixed(2) : "--"} size="lg" />
-              <Metric label="Open Position Cost (Run)" value={bankroll ? Number(openPositionCost).toFixed(2) : "--"} size="lg" />
-              <Metric label="Estimated Return (Run)" value={Number(estimatedReturn).toFixed(2)} size="lg" />
-              <Metric label="Realized PnL (Run)" value={Number(realizedPnl).toFixed(2)} size="lg" />
-            </div>
+      <div className="grid grid-cols-4 gap-4 mb-3">
+        <Metric label="Strategy Equity (Run)" value={bankroll ? Number(bankroll.bankroll).toFixed(2) : "--"} size="lg" />
+        <Metric label="Open Position Cost (Run)" value={bankroll ? Number(openPositionCost).toFixed(2) : "--"} size="lg" />
+        <Metric label="Estimated Return (Run)" value={Number(estimatedReturn).toFixed(2)} size="lg" />
+        <Metric label="Realized PnL (Run)" value={Number(realizedPnl).toFixed(2)} size="lg" />
+      </div>
 
-            <div className="grid grid-cols-4 gap-4 mb-6 opacity-80">
-              <Metric label="Strategy Equity (Lifetime)" value={lifetimeEquityWithExposure.toFixed(2)} size="sm" />
-              <Metric label="Open Position Cost (Lifetime)" value={Number(lifetimeOpenPositionCost).toFixed(2)} size="sm" />
-              <Metric label="Estimated Return (Lifetime)" value={"N/A"} size="sm" />
-              <Metric label="Realized PnL (Lifetime)" value={Number(lifetimeRealizedPnl).toFixed(2)} size="sm" />
-            </div>
-          </>
-        );
-      })()}
+      <div className="grid grid-cols-4 gap-4 mb-6 opacity-80">
+        <Metric label="Strategy Equity (Lifetime)" value={Number(lifetimeEquity).toFixed(2)} size="sm" />
+        <Metric label="Open Position Cost (Lifetime)" value={Number(lifetimeOpenPositionCost).toFixed(2)} size="sm" />
+        <Metric label="Estimated Return (Lifetime)" value={"N/A"} size="sm" />
+        <Metric label="Realized PnL (Lifetime)" value={Number(lifetimeRealizedPnl).toFixed(2)} size="sm" />
+      </div>
 
       <div className="text-[11px] text-zinc-500 mb-6">
         Unrealized PnL estimator: conservative bid-side liquidation value minus fee-equivalent taker fee estimate (15m crypto).
@@ -789,19 +780,31 @@ export const Dashboard: React.FC = () => {
       <div className="bg-black border border-zinc-800 rounded p-4 mb-8">
         <h2 className="text-sm text-zinc-400 mb-3 flex items-center gap-2">
           <TrendingUp className="text-purple-400" />
-          Strategy Performance
+          Hybrid Strategy Performance
+          <span className="text-xs text-zinc-500 ml-2">(Market Making 70% | Directional 25% | Arbitrage 5%)</span>
         </h2>
         {errStrategyPerformance && <ErrorBox title="bot_strategy_performance error" text={errStrategyPerformance} />}
         {latestStrategyPerformance ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {Object.entries(latestStrategyPerformance).map(([name, perf]) => (
-              <div key={name} className="bg-zinc-900 border border-zinc-700 rounded p-3">
-                <div className="text-sm font-mono mb-2 capitalize">{name}</div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {Object.entries(latestStrategyPerformance).map(([name, perf]) => {
+              // Map strategy names to display names with colors
+              const displayName = name === 'market_making' ? 'Market Making' :
+                                 name === 'directional' ? 'Selective Directional' :
+                                 name === 'arbitrage' ? 'Opportunistic Arbitrage' :
+                                 name;
+              const allocationLabel = name === 'market_making' ? '70%' :
+                                      name === 'directional' ? '25%' :
+                                      name === 'arbitrage' ? '5%' :
+                                      `${(Number(perf.allocation) * 100).toFixed(1)}%`;
+              const strategyColor = name === 'market_making' ? 'text-blue-400 border-blue-500' :
+                                   name === 'directional' ? 'text-yellow-400 border-yellow-500' :
+                                   name === 'arbitrage' ? 'text-green-400 border-green-500' :
+                                   'text-zinc-300 border-zinc-500';
+              return (
+              <div key={name} className={`bg-zinc-900 border-2 rounded p-3 ${strategyColor.replace('text-', 'border-')}`}>
+                <div className={`text-sm font-mono mb-1 ${strategyColor}`}>{displayName}</div>
+                <div className="text-xs text-zinc-500 mb-2">Allocation: {allocationLabel}</div>
                 <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div>
-                    <div className="text-zinc-500">Allocation</div>
-                    <div className="font-mono">{(Number(perf.allocation) * 100).toFixed(1)}%</div>
-                  </div>
                   <div>
                     <div className="text-zinc-500">PnL</div>
                     <div className={`font-mono ${Number(perf.pnl) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
@@ -847,7 +850,7 @@ export const Dashboard: React.FC = () => {
             <button className="bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 px-2 py-1 rounded text-xs" onClick={() => setCapInput(500)}>500</button>
           </div>
           <div className="flex items-center gap-2">
-            <input type="number" className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm w-32" value={capInput} onChange={(e) => setCapInput(Number(e.target.value))} step={1} min={0} />
+            <input type="number" className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm w-32" value={capInput} onChange={(e) => setCapInput(Number(e.target.value))} step={50} min={0} />
             <button onClick={writeCapPerMarket} className="bg-emerald-900 hover:bg-emerald-800 text-emerald-200 px-3 py-1 rounded text-xs">Set cap_per_market</button>
           </div>
         </div>
@@ -1012,3 +1015,5 @@ function formatSbError(table: string, error: any): string {
   const status = error?.status ? String(error.status) : "";
   return `${table}: ${msg}${code ? ` | code=${code}` : ""}${status ? ` | status=${status}` : ""}`;
 }
+
+
