@@ -801,37 +801,38 @@ export const Dashboard: React.FC = () => {
                                    name === 'arbitrage' ? 'text-green-400 border-green-500' :
                                    'text-zinc-300 border-zinc-500';
               return (
-              <div key={name} className={`bg-zinc-900 border-2 rounded p-3 ${strategyColor.replace('text-', 'border-')}`}>
-                <div className={`text-sm font-mono mb-1 ${strategyColor}`}>{displayName}</div>
-                <div className="text-xs text-zinc-500 mb-2">Allocation: {allocationLabel}</div>
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div>
-                    <div className="text-zinc-500">PnL</div>
-                    <div className={`font-mono ${Number(perf.pnl) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                      ${Number(perf.pnl).toFixed(2)}
+                <div key={name} className={`bg-zinc-900 border-2 rounded p-3 ${strategyColor.replace('text-', 'border-')}`}>
+                  <div className={`text-sm font-mono mb-1 ${strategyColor}`}>{displayName}</div>
+                  <div className="text-xs text-zinc-500 mb-2">Allocation: {allocationLabel}</div>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div>
+                      <div className="text-zinc-500">PnL</div>
+                      <div className={`font-mono ${Number(perf.pnl) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        ${Number(perf.pnl).toFixed(2)}
+                      </div>
                     </div>
-                  </div>
-                  <div>
-                    <div className="text-zinc-500">ROI</div>
-                    <div className={`font-mono ${Number(perf.roi) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                      {Number(perf.roi).toFixed(2)}%
+                    <div>
+                      <div className="text-zinc-500">ROI</div>
+                      <div className={`font-mono ${Number(perf.roi) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        {Number(perf.roi).toFixed(2)}%
+                      </div>
                     </div>
-                  </div>
-                  <div>
-                    <div className="text-zinc-500">Win Rate</div>
-                    <div className="font-mono">{Number(perf.win_rate).toFixed(1)}%</div>
-                  </div>
-                  <div>
-                    <div className="text-zinc-500">Trades</div>
-                    <div className="font-mono">{perf.trades}</div>
-                  </div>
-                  <div>
-                    <div className="text-zinc-500">Wins/Losses</div>
-                    <div className="font-mono">{perf.wins}/{perf.losses}</div>
+                    <div>
+                      <div className="text-zinc-500">Win Rate</div>
+                      <div className="font-mono">{Number(perf.win_rate).toFixed(1)}%</div>
+                    </div>
+                    <div>
+                      <div className="text-zinc-500">Trades</div>
+                      <div className="font-mono">{perf.trades}</div>
+                    </div>
+                    <div>
+                      <div className="text-zinc-500">Wins/Losses</div>
+                      <div className="font-mono">{perf.wins}/{perf.losses}</div>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="text-xs text-zinc-500">No strategy performance data yet</div>
